@@ -1,3 +1,65 @@
+🚀 开始加载数据集...
+
+📁 Training_set/APP_0 找到 5860 个文件
+  ✅ 0_AFRICA_PC_HOME_202506200929_3600_232_0_1_0_0.csv: 147 行
+  ✅ 0_AFRICA_PC_HOME_202506200930_3600_216_0_1_0_0.csv: 133 行
+  ✅ 0_AFRICA_PC_HOME_202506200932_3600_62_0_1_0_0.csv: 41 行
+  ✅ 0_AFRICA_PC_HOME_202506200933_3600_397_0_1_0_0.csv: 262 行
+  ✅ 0_AFRICA_PC_HOME_202506200940_3600_745_0_1_0_0.csv: 474 行
+  ✅ 0_AFRICA_PC_HOME_202506201742_3600_426_0_1_0_0.csv: 273 行
+  ✅ 0_AFRICA_PC_HOME_202506201743_3600_1709_0_1_0_0.csv: 1120 行
+  ✅ 0_AFRICA_PC_HOME_202506201744_3600_1585_0_1_0_0.csv: 1003 行
+  ✅ 0_AFRICA_PC_HOME_202506201745_3600_210_0_1_0_0.csv: 131 行
+  ✅ 0_AFRICA_PC_HOME_202506201746_3600_1709_0_1_0_0.csv: 1088 行
+  ✅ 0_AFRICA_PC_HOME_202506201747_3600_674_0_1_0_0.csv: 427 行
+  ✅ 0_GANSU_SPS_NET_202505260000_3600_15_0_1_0_0.csv: 8 行
+  ✅ 0_GANSU_SPS_NET_202505260001_3600_2_0_1_0_0.csv: 1 行
+  ✅ 1xbet-NULL-20241202-Android-3-train-v0.csv: 3 行
+  ✅ 2GIS-NULL-20240912-Android-15-train-v0.csv: 15 行
+  ✅ 2GIS-NULL-20240912-Android-23-train-v0.csv: 23 行
+  ✅ 2GIS-NULL-20240912-Android-3-train-v0.csv: 3 行
+  ✅ 2GIS-NULL-20240912-IOS-4-train-v0.csv: 4 行
+  ✅ 2GIS-NULL-20240912-IOS-6-train-v0.csv: 6 行
+  ✅ 2GIS-NULL-20240912-IOS-7-train-v0.csv: 7 行
+  ✅ 2GIS-NULL-20240912-IOS-8-train-v0.csv: 8 行
+  ✅ 31cLub-NULL-20240929-Win10-11-train-v0.csv: 11 行
+...
+  ✅ 1_SHANGHAI_SPS_NET_20250619115930_3600_12_1_1_0_0.csv: 12 行
+🎯 Testing_set 总计: 176442 行数据
+
+📊 数据加载完成！
+
+
+数据集概览
+============================================================
+
+训练集:
+  📏 数据形状: (129202, 77)
+  🏷️ 标签分布:
+    0 (正常流量): 90906 样本
+    1 (PCDN流量): 38296 样本
+  📂 文件来源: ['0_AFRICA_PC_HOME_202506200929_3600_232_0_1_0_0.csv'
+ '0_AFRICA_PC_HOME_202506200930_3600_216_0_1_0_0.csv'
+ '0_AFRICA_PC_HOME_202506200932_3600_62_0_1_0_0.csv' ...
+ '1_BNEIJING_SPS_NET_202507081607_3600_438_1_1_0_0.csv'
+ '1_BNEIJING_SPS_NET_202507081608_3600_381_1_1_0_0.csv'
+ '1_BNEIJING_SPS_NET_202507081609_3600_343_1_1_0_0.csv']
+
+验证集:
+  📏 数据形状: (30602, 77)
+  🏷️ 标签分布:
+    0 (正常流量): 21028 样本
+    1 (PCDN流量): 9574 样本
+  📂 文件来源: ['0_AFRICA_PC_HOME_202506200929_3600_232_0_1_0_0.csv'
+ '0_AFRICA_PC_HOME_202506200930_3600_216_0_1_0_0.csv'
+ '0_AFRICA_PC_HOME_202506200932_3600_62_0_1_0_0.csv' ...
+ '1_BNEIJING_SPS_NET_202507081607_3600_438_1_1_0_0.csv'
+...
+总字段数: 77
+字段列表: ['frame.number', 'frame.time_relative', 'ip.version', 'ip.hdr_len', 'ip.dsfield', 'ip.len', 'ip.ttl', 'ip.proto', 'ip.src', 'ip.dst', 'ipv6.plen', 'ipv6.nxt', 'ipv6.src', 'ipv6.dst', 'tcp.srcport', 'tcp.dstport', 'tcp.hdr_len', 'tcp.flags.syn', 'tcp.flags.ack', 'tcp.payload', 'udp.srcport', 'udp.dstport', 'udp.length', 'data.data', '_ws.col.Protocol', 'ssl.handshake.extensions_server_name', 'eth.src', 'pcap_duration', 'app', 'os', 'date', 'srcport', 'dstport', 'flow_id', 'dpi_file_name', 'dpi_five_tuple', 'dpi_rule_result', 'dpi_label', 'ulProtoID', 'dpi_rule_pkt', 'dpi_packets', 'dpi_bytes', 'flow_uplink_traffic', 'flow_downlink_traffic', 'label_source', 'sum_pkt_len', 'total_pkts', 'srcport_cls', 'dstport_cls', 'pkt_len_avg', 'pkt_len_max', 'pkt_len_min', 'up_pkts', 'up_bytes', 'down_pkts', 'down_bytes', 'up_pkt_ratio', 'down_pkt_ratio', 'up_byte_ratio', 'down_byte_ratio', 'up_down_pkt_ratio', 'up_down_byte_ratio', 'iat_avg', 'iat_max', 'iat_min', 'avg_speed', 'avg_pkt_speed', 'max_burst', 'ip_direction', 'pkt_len', 'iat', 'payload', 'id', 'category', 'label', 'source_file', 'ratio']
+
+
+
 🔧 开始数据预处理...
 📊 缺失值统计:
 frame.number             1954
