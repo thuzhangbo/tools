@@ -1,0 +1,30 @@
+🔧 开始数据预处理...
+📊 缺失值统计:
+frame.number             1954
+frame.time_relative      1954
+ip.version               1954
+ip.hdr_len               1954
+ip.dsfield               1954
+                        ...  
+iat                      1954
+payload                  1954
+id                     127248
+category               129160
+ratio                   96344
+Length: 75, dtype: int64
+🔄 处理 ip_direction 字段...
+⚠️ 处理 ip_direction 时出错: malformed node or string on line 1: <ast.Name object at 0x000001EB0E505F60>，保持原始数据
+🔄 处理 pkt_len 字段...
+⚠️ 处理 pkt_len 时出错: malformed node or string on line 1: <ast.Name object at 0x000001EB0E6D96F0>，保持原始数据
+🔄 处理 iat 字段...
+⚠️ 处理 iat 时出错: malformed node or string on line 1: <ast.Name object at 0x000001EB0E6D9E10>，保持原始数据
+🔄 处理 payload 字段...
+🎯 预处理完成！最终特征数: 77
+
+✅ 训练集预处理完成
+🔧 开始数据预处理...
+...
+⚠️ 处理 iat 时出错: malformed node or string on line 1: <ast.Name object at 0x000001EB0E6DBF10>，保持原始数据
+🔄 处理 payload 字段...
+🎯 预处理完成！最终特征数: 78
+✅ 测试集预处理完成
