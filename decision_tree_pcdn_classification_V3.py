@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.tree import DecisionTreeClassifier, plot_tree, export_text
 from sklearn.model_selection import GridSearchCV
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, accuracy_score
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, accuracy_score, precision_recall_curve, f1_score, precision_score, recall_score
 from sklearn.preprocessing import StandardScaler
 import os
 import glob
@@ -562,7 +562,6 @@ def threshold_analysis(y_true, y_prob, set_name="Test Set"):
     """
     阈值分析函数，寻找最优分类阈值
     """
-    from sklearn.metrics import precision_recall_curve
     
     print(f"\n🔍 {set_name} 阈值分析:")
     
@@ -751,9 +750,6 @@ plt.show()
 print(f"\n1️⃣5️⃣ 阈值优化分析 - 降低正常流量误分类...")
 print("=" * 80)
 
-from sklearn.metrics import precision_recall_curve, f1_score, precision_score, recall_score
-
-
 # 对测试集进行阈值分析
 print("🎯 重点分析: 如何降低正常流量被误分类为PCDN流量的情况")
 
@@ -786,8 +782,7 @@ default_recall = recall_score(y_test, y_test_pred_default)
 default_f1 = f1_score(y_test, y_test_pred_default)
 
 # 计算默认阈值的混淆矩阵
-from sklearn.metrics import confusion_matrix as cm
-default_cm = cm(y_test, y_test_pred_default)
+default_cm = confusion_matrix(y_test, y_test_pred_default)
 default_tn, default_fp, default_fn, default_tp = default_cm.ravel()
 default_fpr = default_fp / (default_fp + default_tn)
 
@@ -804,7 +799,7 @@ if 'Low False Positive (FPR ≤5%)' in test_strategies:
     optimal_threshold = low_fpr_strategy['threshold']
     
     y_test_pred_optimal = (y_test_prob >= optimal_threshold).astype(int)
-    optimal_cm = cm(y_test, y_test_pred_optimal)
+    optimal_cm = confusion_matrix(y_test, y_test_pred_optimal)
     optimal_tn, optimal_fp, optimal_fn, optimal_tp = optimal_cm.ravel()
     optimal_fpr = optimal_fp / (optimal_fp + optimal_tn)
     
