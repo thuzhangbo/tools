@@ -1,14 +1,31 @@
 # PCDN vs Normal Traffic Classification using XGBoost
-# 使用 ip.proto 和 tcp.srcport 特征进行二分类
 
+这个项目使用XGBoost对正常流量和PCDN流量进行二分类。
+
+## 📊 数据集结构
+- **Training_set/APP_0**: 正常流量 (标签=0)
+- **Training_set/APP_1**: PCDN流量 (标签=1)  
+- **Validation_set**: 验证集
+- **Testing_set**: 测试集
+
+## 🔧 主要功能
+- ✅ **智能数据加载**: 四级列一致性检查，自动发现并修复CSV文件间的列差异
+- ✅ **序列特征工程**: 将`ip_direction`、`pkt_len`、`iat`转换为丰富的统计特征
+- ✅ **XGBoost分类**: 版本兼容训练，特征重要性分析
+- ✅ **完整可视化**: ROC曲线、混淆矩阵、特征重要性图表
+- ✅ **跨数据集诊断**: 精确识别"为什么测试集比训练集多1个特征"
+
+# 📦 导入必要的库
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import xgboost as xgb
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve, accuracy_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, roc_curve
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from scipy import stats  # 用于序列特征的偏度和峰度计算
+import ast  # 用于安全解析数组字符串
 import os
 import glob
 import warnings
@@ -19,365 +36,1844 @@ plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # 设置图表样式
-try:
-    plt.style.use('seaborn-v0_8')
-except:
-    plt.style.use('default')
+plt.style.use('seaborn-v0_8')
 sns.set_palette("husl")
 
-print("🚀 开始PCDN流量分类任务")
-print("📋 使用特征: ip.proto, tcp.srcport")
+print("✅ 库导入完成！")
+
+# ===== 🔧 配置参数 =====
+ENABLE_SEQUENCE_FEATURES = True  # 控制序列特征处理：True=特征工程, False=删除序列特征
+
+print("=" * 60)
+print(f"🔧 序列特征处理模式: {'启用 ✅' if ENABLE_SEQUENCE_FEATURES else '禁用 ❌'}")
 print("=" * 60)
 
-# 定义数据路径
-base_path = "pcdn_32_pkts_2class_feature_enhance_v17.4_dataset"
-train_path = os.path.join(base_path, "Training_set")
-val_path = os.path.join(base_path, "Validation_set") 
-test_path = os.path.join(base_path, "Testing_set")
+if ENABLE_SEQUENCE_FEATURES:
+    print("📊 启用模式 - 执行复杂的序列特征工程:")
+    print("   • ip_direction → 15个统计特征 (方向模式分析)")
+    print("   • pkt_len → 15个统计特征 (包大小模式分析)")  
+    print("   • iat → 15个统计特征 (时间间隔模式分析)")
+    print("   • 总计生成 45+ 个新特征")
+    print("   💡 适合: 追求最佳性能，充分利用时序信息")
+else:
+    print("🗑️ 禁用模式 - 直接删除序列特征:")
+    print("   • 删除 ip_direction, pkt_len, iat")
+    print("   • 仅使用其他网络流量特征训练")
+    print("   • 模型更简单，训练速度更快")
+    print("   💡 适合: 资源有限，或希望简化模型的场景")
 
-# 选择的特征
-selected_features = ['ip.proto', 'tcp.srcport']
+print("\n💭 要切换模式，请修改上方 ENABLE_SEQUENCE_FEATURES 的值")
+print("=" * 60)
 
-def load_data_from_directory(directory_path, label):
-    """加载指定目录下的所有CSV文件"""
-    csv_files = glob.glob(os.path.join(directory_path, "*.csv"))
-    dataframes = []
+# 🔧 数据类型统一工具：解决数值列 0 与 0.0 不一致问题
+import pandas as pd
+import numpy as np
+
+NUMERIC_FIELDS_CANONICAL = [
+    'frame.number', 'frame.time_relative', 'ip.version', 'ip.hdr_len',
+    'ip.dsfield', 'ip.len', 'ip.ttl', 'ip.proto', 'ipv6.plen', 'ipv6.nxt',
+    'tcp.srcport', 'tcp.dstport', 'tcp.hdr_len', 'tcp.flags.syn', 'tcp.flags.ack',
+    'tcp.payload', 'udp.srcport', 'udp.dstport', 'udp.length', 'pcap_duration',
+    'srcport', 'dstport', 'ulProtoID', 'dpi_rule_pkt', 'dpi_packets', 'dpi_bytes',
+    'flow_uplink_traffic', 'flow_downlink_traffic', 'sum_pkt_len', 'total_pkts',
+    'srcport_cls', 'dstport_cls', 'pkt_len_avg', 'pkt_len_max', 'pkt_len_min',
+    'up_pkts', 'up_bytes', 'down_pkts', 'down_bytes', 'up_pkt_ratio', 'down_pkt_ratio',
+    'up_byte_ratio', 'down_byte_ratio', 'up_down_pkt_ratio', 'up_down_byte_ratio',
+    'iat_avg', 'iat_max', 'iat_min', 'avg_speed', 'avg_pkt_speed', 'max_burst'
+]
+
+def normalize_data_types(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将常见数值特征统一为 float64，避免 0 与 0.0 类型不一致带来的隐含偏差。
+    - 仅对能成功转换为数值的列做统一处理
+    - 其他列保持不变
+    """
+    if df is None or len(df) == 0:
+        return df
+    df_norm = df.copy()
+
+    # 优先对预定义字段做统一；若字段不存在则跳过
+    for col in NUMERIC_FIELDS_CANONICAL:
+        if col in df_norm.columns:
+            df_norm[col] = pd.to_numeric(df_norm[col], errors='coerce')
+            if pd.api.types.is_numeric_dtype(df_norm[col]):
+                df_norm[col] = df_norm[col].astype('float64')
+
+    # 兜底：对其余已是数值类型但不是 float64 的列，也统一为 float64
+    for col in df_norm.columns:
+        if col in ['label', 'source_file', 'app_category']:
+            continue
+        if pd.api.types.is_numeric_dtype(df_norm[col]) and df_norm[col].dtype != 'float64':
+            df_norm[col] = df_norm[col].astype('float64')
+
+    return df_norm
+
+
+def check_dtype_consistency(df: pd.DataFrame, fields=None):
+    """简单打印关键字段的数据类型。"""
+    if df is None or df.empty:
+        print('⚠️ DataFrame为空，跳过类型检查')
+        return
+    fields = fields or ['tcp.payload', 'tcp.srcport', 'tcp.dstport', 'ip.len', 'udp.length']
+    present = [f for f in fields if f in df.columns]
+    if not present:
+        print('ℹ️ 关键字段在当前DataFrame中不存在')
+        return
+    print('字段类型检查:')
+    for f in present:
+        print(f"  - {f}: {df[f].dtype}")
+
+# 🔧 智能数据加载函数（支持四级列一致性检查）
+
+def load_data_from_directory(base_path, label):
+    """
+    从指定目录加载所有CSV文件并添加标签 - 增强版：确保列一致性
+    """
+    csv_files = glob.glob(os.path.join(base_path, '*.csv'))
+    print(f"在 {base_path} 中找到 {len(csv_files)} 个CSV文件")
     
-    for file in csv_files:
+    dataframes = []
+    all_columns_info = []  # 收集所有文件的列信息
+    
+    # 🔍 第一遍扫描：检查所有文件的列结构
+    print(f"\n🔍 检查CSV文件列结构 ({os.path.basename(base_path)}):")
+    for i, file in enumerate(csv_files):
+        try:
+            # 只读取第一行来获取列名，避免加载整个文件
+            df_sample = pd.read_csv(file, nrows=1)
+            file_columns = list(df_sample.columns)
+            all_columns_info.append({
+                'file': file,
+                'columns': file_columns,
+                'count': len(file_columns)
+            })
+            
+            print(f"  文件{i+1}: {os.path.basename(file)} -> {len(file_columns)}列")
+            
+            # 显示前几个和后几个列名
+            if len(file_columns) <= 6:
+                print(f"    列名: {file_columns}")
+            else:
+                print(f"    列名: {file_columns[:3]} ... {file_columns[-3:]}")
+                
+        except Exception as e:
+            print(f"⚠️ 检查文件 {file} 时出错: {e}")
+    
+    # 🔍 分析列数差异
+    column_counts = [info['count'] for info in all_columns_info]
+    unique_counts = sorted(set(column_counts))
+    
+    if len(unique_counts) > 1:
+        print(f"\n❌ 发现列数不一致问题！")
+        for count in unique_counts:
+            files_with_count = [f"文件{i+1}({os.path.basename(info['file'])})" 
+                              for i, info in enumerate(all_columns_info) 
+                              if info['count'] == count]
+            print(f"  📊 {count}列: {', '.join(files_with_count)}")
+        
+        # 🔧 计算所有文件的共同列
+        if all_columns_info:
+            common_columns = set(all_columns_info[0]['columns'])
+            for info in all_columns_info[1:]:
+                common_columns = common_columns.intersection(set(info['columns']))
+            
+            common_columns_list = sorted(list(common_columns))
+            print(f"\n🔧 所有文件的共同列数: {len(common_columns_list)}")
+            
+            # 显示各文件将被排除的列
+            print("📝 各文件独有的列:")
+            for i, info in enumerate(all_columns_info):
+                excluded = set(info['columns']) - common_columns
+                if excluded:
+                    print(f"  文件{i+1}: {sorted(list(excluded))}")
+                else:
+                    print(f"  文件{i+1}: 无独有列")
+                    
+            print(f"✅ 将统一使用 {len(common_columns_list)} 个共同列")
+            target_columns = common_columns_list
+        else:
+            target_columns = None
+            print("❌ 无法确定共同列")
+    else:
+        print(f"✅ 所有文件列数一致: {column_counts[0]}列")
+        target_columns = None
+    
+    # 📊 第二遍：使用统一列结构加载数据
+    print(f"\n📊 正式加载数据:")
+    for i, file in enumerate(csv_files):
         try:
             df = pd.read_csv(file)
-            df['label'] = label  # 添加标签
-            df['source_file'] = os.path.basename(file)  # 记录来源文件
-            dataframes.append(df)
-            print(f"✅ 加载文件: {file} (样本数: {len(df)})")
-        except Exception as e:
-            print(f"❌ 加载文件失败: {file}, 错误: {e}")
-    
-    if dataframes:
-        combined_df = pd.concat(dataframes, ignore_index=True)
-        print(f"📊 {directory_path} 总样本数: {len(combined_df)}")
-        return combined_df
-    else:
-        print(f"⚠️  {directory_path} 没有找到有效数据")
-        return pd.DataFrame()
-
-# 1. 加载训练集数据
-print("\n1️⃣ 加载训练集数据...")
-train_normal = load_data_from_directory(os.path.join(train_path, "APP_0"), 0)  # 正常流量
-train_pcdn = load_data_from_directory(os.path.join(train_path, "APP_1"), 1)    # PCDN流量
-
-# 2. 加载验证集数据
-print("\n2️⃣ 加载验证集数据...")
-val_normal = load_data_from_directory(os.path.join(val_path, "APP_0"), 0)
-val_pcdn = load_data_from_directory(os.path.join(val_path, "APP_1"), 1)
-
-# 3. 加载测试集数据
-print("\n3️⃣ 加载测试集数据...")
-test_normal = load_data_from_directory(os.path.join(test_path, "APP_0"), 0)
-test_pcdn = load_data_from_directory(os.path.join(test_path, "APP_1"), 1)
-
-# 4. 合并数据集
-print("\n4️⃣ 合并数据集...")
-
-# 检查是否有空的数据集
-def safe_concat(dataframes, set_name):
-    """安全合并数据集，处理空数据集的情况"""
-    non_empty_dfs = [df for df in dataframes if not df.empty]
-    if not non_empty_dfs:
-        print(f"⚠️  {set_name} 没有有效数据!")
-        return pd.DataFrame()
-    return pd.concat(non_empty_dfs, ignore_index=True)
-
-train_data = safe_concat([train_normal, train_pcdn], "训练集")
-val_data = safe_concat([val_normal, val_pcdn], "验证集")
-test_data = safe_concat([test_normal, test_pcdn], "测试集")
-
-# 检查数据集是否为空
-if train_data.empty or val_data.empty or test_data.empty:
-    print("❌ 数据集为空，请检查数据路径和文件")
-    exit()
-
-print(f"训练集: {len(train_data)} 样本 (正常: {len(train_normal)}, PCDN: {len(train_pcdn)})")
-print(f"验证集: {len(val_data)} 样本 (正常: {len(val_normal)}, PCDN: {len(val_pcdn)})")
-print(f"测试集: {len(test_data)} 样本 (正常: {len(test_normal)}, PCDN: {len(test_pcdn)})")
-
-# 5. 特征提取和预处理
-print(f"\n5️⃣ 特征提取和预处理...")
-print(f"选择的特征: {selected_features}")
-
-def preprocess_features(data, features):
-    """预处理特征数据"""
-    processed_data = data.copy()
-    
-    # 检查特征是否存在
-    missing_features = [f for f in features if f not in processed_data.columns]
-    if missing_features:
-        print(f"⚠️  缺失特征: {missing_features}")
-        return None
-    
-    # 提取选择的特征
-    feature_data = processed_data[features].copy()
-    
-    # 处理缺失值
-    print(f"📊 特征缺失值统计:")
-    for feature in features:
-        missing_count = feature_data[feature].isna().sum()
-        print(f"  {feature}: {missing_count} 个缺失值")
-        
-        # 对于数值型特征，用中位数填充缺失值
-        if missing_count > 0:
-            median_val = feature_data[feature].median()
-            if pd.isna(median_val):  # 如果中位数也是NaN（全部都是缺失值）
-                # 使用0填充或者特征的典型值
-                if feature == 'ip.proto':
-                    fill_val = 6  # TCP协议
-                elif feature == 'tcp.srcport':
-                    fill_val = 0  # 默认端口
-                else:
-                    fill_val = 0  # 通用默认值
-                print(f"    特征全部缺失，使用默认值 {fill_val} 填充")
-            else:
-                fill_val = median_val
-                print(f"    已用中位数 {fill_val} 填充")
+            original_shape = df.shape
             
-            feature_data[feature].fillna(fill_val, inplace=True)
+            # 如果需要，只保留共同列
+            if target_columns is not None:
+                df = df[target_columns]
+                print(f"  🔧 文件{i+1}: {original_shape} -> {df.shape} (列对齐)")
+            
+            df['label'] = label  # 添加标签列
+            df['source_file'] = os.path.basename(file)  # 添加源文件信息
+            dataframes.append(df)
+            print(f"  ✅ {os.path.basename(file)}: {len(df)}行 x {len(df.columns)}列")
+            
+        except Exception as e:
+            print(f"  ❌ 加载文件 {file} 时出错: {e}")
     
-    return feature_data
+    # 🎯 最终合并和验证
+    if dataframes:
+        # 最后检查：确保所有dataframe列数一致
+        final_shapes = [df.shape for df in dataframes]
+        final_col_counts = [shape[1] for shape in final_shapes]
+        
+        if len(set(final_col_counts)) == 1:
+            print(f"✅ 合并前最终检查通过: 所有文件均为 {final_col_counts[0]} 列")
+        else:
+            print(f"⚠️ 合并前发现列数差异: {final_col_counts}")
+        
+        result = pd.concat(dataframes, ignore_index=True)
+        
+        print(f"🎉 数据加载完成:")
+        print(f"  📁 文件数: {len(csv_files)}")
+        print(f"  📊 最终形状: {result.shape}")
+        print(f"  🏷️ 标签值: {label}")
+        
+        # 📋 返回结果和列信息
+        columns_meta = {
+            'final_columns': list(result.columns),
+            'original_columns_info': all_columns_info,
+            'target_columns': target_columns,
+            'dataset_path': base_path
+        }
+        
+        return result, columns_meta
+    else:
+        print("❌ 没有成功加载任何文件")
+        return pd.DataFrame(), {}
 
-# 预处理各数据集的特征
-X_train = preprocess_features(train_data, selected_features)
-X_val = preprocess_features(val_data, selected_features)
-X_test = preprocess_features(test_data, selected_features)
 
-if X_train is None or X_val is None or X_test is None:
-    print("❌ 特征预处理失败，请检查特征名称")
-    exit()
+def analyze_cross_dataset_columns(datasets_info):
+    """
+    分析不同数据集之间的列差异，包括CSV文件级别的详细分析
+    datasets_info: 字典，格式为 {'数据集名称': columns_meta}
+    """
+    print("\n" + "="*80)
+    print("🔍 跨数据集列结构一致性分析")
+    print("="*80)
+    
+    # 收集所有数据集的列信息
+    dataset_columns = {}
+    dataset_csv_info = {}  # 新增：收集每个数据集的CSV文件详细信息
+    
+    for dataset_name, meta in datasets_info.items():
+        if 'final_columns' in meta and meta['final_columns']:
+            # 排除我们添加的辅助列
+            original_cols = [col for col in meta['final_columns'] 
+                           if col not in ['label', 'source_file']]
+            dataset_columns[dataset_name] = set(original_cols)
+            print(f"📊 {dataset_name}: {len(original_cols)}个原始列")
+            
+            # 收集CSV文件级别的信息
+            dataset_csv_info[dataset_name] = {
+                'normal_meta': meta.get('normal_meta', {}),
+                'pcdn_meta': meta.get('pcdn_meta', {})
+            }
+    
+    if len(dataset_columns) < 2:
+        print("⚠️ 数据集数量不足，无法进行跨数据集比较")
+        return
+    
+    # 计算所有数据集的列统计
+    all_datasets = list(dataset_columns.keys())
+    column_counts = {name: len(cols) for name, cols in dataset_columns.items()}
+    
+    print(f"\n📈 列数统计:")
+    for dataset, count in column_counts.items():
+        print(f"  {dataset}: {count}列")
+    
+    # 检查列数是否一致
+    unique_counts = set(column_counts.values())
+    if len(unique_counts) == 1:
+        print("✅ 所有数据集列数一致")
+    else:
+        print(f"❌ 发现列数不一致: {sorted(unique_counts)}")
+    
+    # 计算所有数据集的共同列和独有列
+    all_columns = set()
+    for cols in dataset_columns.values():
+        all_columns = all_columns.union(cols)
+    
+    common_columns = set.intersection(*dataset_columns.values()) if dataset_columns else set()
+    
+    print(f"\n🔧 列分析结果:")
+    print(f"  所有唯一列数: {len(all_columns)}")
+    print(f"  共同列数: {len(common_columns)}")
+    print(f"  差异列数: {len(all_columns) - len(common_columns)}")
+    
+    # 🆕 CSV文件级别的列差异检查（仅显示不一致的情况）
+    print(f"\n📁 CSV文件列差异检查:")
+    found_issues = False
+    for dataset, cols in dataset_columns.items():
+        csv_info = dataset_csv_info.get(dataset, {})
+        
+        # 检查APP_0 (正常流量) 的CSV文件
+        normal_meta = csv_info.get('normal_meta', {})
+        if 'original_columns_info' in normal_meta:
+            csv_files_info = normal_meta['original_columns_info']
+            print(f"\n  🔍 {dataset} - APP_0:")
+            _analyze_csv_files_columns(csv_files_info, "APP_0")
+            found_issues = True
+        
+        # 检查APP_1 (PCDN流量) 的CSV文件  
+        pcdn_meta = csv_info.get('pcdn_meta', {})
+        if 'original_columns_info' in pcdn_meta:
+            csv_files_info = pcdn_meta['original_columns_info']
+            print(f"  🔍 {dataset} - APP_1:")
+            _analyze_csv_files_columns(csv_files_info, "APP_1")
+            found_issues = True
+    
+    if not found_issues:
+        print("  ✅ 所有CSV文件列结构一致")
+    
+    # 跨数据集独有列分析（仅显示有差异的数据集）
+    print(f"\n📝 跨数据集独有列分析:")
+    has_differences = False
+    
+    for dataset, cols in dataset_columns.items():
+        unique_to_dataset = cols - common_columns
+        missing_columns = common_columns - cols
+        
+        if unique_to_dataset or missing_columns:
+            has_differences = True
+            print(f"\n  ⚠️ {dataset} ({len(cols)}列):")
+            
+            if unique_to_dataset:
+                print(f"    🔸 独有列({len(unique_to_dataset)}): {sorted(list(unique_to_dataset))}")
+                
+                # 显示独有列来源的CSV文件
+                csv_info = dataset_csv_info.get(dataset, {})
+                source_files = []
+                
+                # 检查APP_0文件
+                normal_meta = csv_info.get('normal_meta', {})
+                if 'original_columns_info' in normal_meta:
+                    for i, file_info in enumerate(normal_meta['original_columns_info']):
+                        file_columns = set(file_info['columns'])
+                        file_unique = file_columns.intersection(unique_to_dataset)
+                        if file_unique:
+                            filename = os.path.basename(file_info['file'])
+                            source_files.append(f"APP_0/{filename}({sorted(list(file_unique))})")
+                
+                # 检查APP_1文件
+                pcdn_meta = csv_info.get('pcdn_meta', {})
+                if 'original_columns_info' in pcdn_meta:
+                    for i, file_info in enumerate(pcdn_meta['original_columns_info']):
+                        file_columns = set(file_info['columns'])
+                        file_unique = file_columns.intersection(unique_to_dataset)
+                        if file_unique:
+                            filename = os.path.basename(file_info['file'])
+                            source_files.append(f"APP_1/{filename}({sorted(list(file_unique))})")
+                
+                if source_files:
+                    print(f"    📁 来源: {', '.join(source_files)}")
+            
+            if missing_columns:
+                print(f"    🔸 缺失列({len(missing_columns)}): {sorted(list(missing_columns))}")
+    
+    if not has_differences:
+        print("  ✅ 所有数据集列完全一致")
+    
+    # 两两数据集对比（仅显示有差异的对比）
+    if len(dataset_columns) > 1:
+        print(f"\n🔄 数据集差异对比:")
+        datasets_list = list(dataset_columns.keys())
+        has_pair_differences = False
+        
+        for i in range(len(datasets_list)):
+            for j in range(i+1, len(datasets_list)):
+                dataset1, dataset2 = datasets_list[i], datasets_list[j]
+                cols1, cols2 = dataset_columns[dataset1], dataset_columns[dataset2]
+                
+                only_in_1 = cols1 - cols2
+                only_in_2 = cols2 - cols1
+                
+                if only_in_1 or only_in_2:
+                    has_pair_differences = True
+                    print(f"\n  ⚠️ {dataset1} vs {dataset2}:")
+                    
+                    if only_in_1:
+                        print(f"    🔸 仅{dataset1}有({len(only_in_1)}): {sorted(list(only_in_1))}")
+                        _show_unique_columns_source(dataset1, only_in_1, dataset_csv_info)
+                        
+                    if only_in_2:
+                        print(f"    🔸 仅{dataset2}有({len(only_in_2)}): {sorted(list(only_in_2))}")
+                        _show_unique_columns_source(dataset2, only_in_2, dataset_csv_info)
+        
+        if not has_pair_differences:
+            print("  ✅ 所有数据集完全匹配")
+    
+    # 推荐的统一策略
+    print(f"\n💡 统一策略建议:")
+    if len(common_columns) == len(all_columns):
+        print("✅ 所有数据集列完全一致，无需调整")
+    else:
+        print(f"🔧 建议统一到共同列集合 ({len(common_columns)}列)")
+        print(f"   这将确保所有数据集具有相同的特征结构")
+        
+        lost_columns = all_columns - common_columns
+        if lost_columns:
+            print(f"   ⚠️ 将丢失的列: {sorted(list(lost_columns))}")
+    
+    print("="*80)
 
-# 提取标签
-y_train = train_data['label'].values
-y_val = val_data['label'].values  
-y_test = test_data['label'].values
 
-# 6. 特征标准化（重要：确保训练集、验证集、测试集使用相同的标准化参数）
-print(f"\n6️⃣ 特征标准化...")
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)  # 只在训练集上fit
-X_val_scaled = scaler.transform(X_val)          # 验证集使用训练集的参数
-X_test_scaled = scaler.transform(X_test)        # 测试集使用训练集的参数
+def _analyze_csv_files_columns(csv_files_info, app_type):
+    """
+    分析单个APP目录下所有CSV文件的列差异 - 精简版，只显示关键不一致信息
+    """
+    if not csv_files_info:
+        return
+    
+    # 收集所有文件的列信息
+    file_column_counts = {}
+    
+    for i, file_info in enumerate(csv_files_info):
+        filename = os.path.basename(file_info['file'])
+        file_columns = set(file_info['columns'])
+        col_count = len(file_columns)
+        
+        file_column_counts[filename] = {
+            'columns': file_columns,
+            'count': col_count
+        }
+    
+    # 分析列数分布
+    count_distribution = {}
+    for filename, info in file_column_counts.items():
+        count = info['count']
+        if count not in count_distribution:
+            count_distribution[count] = []
+        count_distribution[count].append(filename)
+    
+    # 只在发现不一致时输出详细信息
+    if len(count_distribution) > 1:
+        print(f"      ❌ {app_type}列数不一致:")
+        for count in sorted(count_distribution.keys()):
+            files = count_distribution[count]
+            print(f"        {count}列: {files}")
+        
+        # 计算共同列并只显示有独有列的文件
+        common_columns_in_app = set(csv_files_info[0]['columns'])
+        for file_info in csv_files_info[1:]:
+            common_columns_in_app = common_columns_in_app.intersection(set(file_info['columns']))
+        
+        # 只显示有独有列的特殊文件
+        special_files = []
+        for filename, info in file_column_counts.items():
+            file_columns = info['columns']
+            unique_columns = file_columns - common_columns_in_app
+            if unique_columns:
+                special_files.append(f"{filename}(+{sorted(list(unique_columns))})")
+        
+        if special_files:
+            print(f"      🔸 特殊文件: {', '.join(special_files)}")
 
-print(f"✅ 标准化完成")
-print(f"训练集特征形状: {X_train_scaled.shape}")
-print(f"验证集特征形状: {X_val_scaled.shape}")
-print(f"测试集特征形状: {X_test_scaled.shape}")
 
-# 7. 数据集基本统计
-print(f"\n7️⃣ 数据集统计信息...")
-print(f"训练集标签分布: {np.bincount(y_train)}")
-print(f"验证集标签分布: {np.bincount(y_val)}")
-print(f"测试集标签分布: {np.bincount(y_test)}")
+def _show_unique_columns_source(dataset_name, unique_columns, dataset_csv_info):
+    """
+    辅助函数：简洁显示独有列来自哪个CSV文件
+    """
+    csv_info = dataset_csv_info.get(dataset_name, {})
+    source_files = []
+    
+    # 检查APP_0 (正常流量) 的CSV文件
+    normal_meta = csv_info.get('normal_meta', {})
+    if 'original_columns_info' in normal_meta:
+        for file_info in normal_meta['original_columns_info']:
+            file_columns = set(file_info['columns'])
+            file_unique = file_columns.intersection(unique_columns)
+            if file_unique:
+                filename = os.path.basename(file_info['file'])
+                source_files.append(f"APP_0/{filename}")
+    
+    # 检查APP_1 (PCDN流量) 的CSV文件
+    pcdn_meta = csv_info.get('pcdn_meta', {})
+    if 'original_columns_info' in pcdn_meta:
+        for file_info in pcdn_meta['original_columns_info']:
+            file_columns = set(file_info['columns'])
+            file_unique = file_columns.intersection(unique_columns)
+            if file_unique:
+                filename = os.path.basename(file_info['file'])
+                source_files.append(f"APP_1/{filename}")
+    
+    if source_files:
+        print(f"      📁 来源: {', '.join(source_files)}")
 
-# 显示特征统计
-print(f"\n📊 特征统计 (训练集):")
-feature_stats = pd.DataFrame(X_train, columns=selected_features).describe()
-print(feature_stats)
+print("✅ 数据加载函数定义完成！")
 
-print(f"\n🎯 数据准备完成，开始模型训练...")
+# 🔧 数据类型统一：解决0和0.0不一致问题
+print("\n🔧 统一数据类型（解决0和0.0不一致问题）")
+print("=" * 60)
 
-# 8. XGBoost模型训练
-print(f"\n8️⃣ 训练XGBoost模型...")
+# 在数据预处理前统一数据类型
+if 'train_data' in globals() and len(train_data) > 0:
+    print("📊 统一训练集数据类型...")
+    train_data = normalize_data_types(train_data)
+    print(f"  ✅ 训练集数据类型已统一")
 
-# 创建XGBoost分类器
+if 'val_data' in globals() and len(val_data) > 0:
+    print("📊 统一验证集数据类型...")
+    val_data = normalize_data_types(val_data)
+    print(f"  ✅ 验证集数据类型已统一")
+
+if 'test_data' in globals() and len(test_data) > 0:
+    print("📊 统一测试集数据类型...")
+    test_data = normalize_data_types(test_data)
+    print(f"  ✅ 测试集数据类型已统一")
+
+# 检查关键字段的数据类型
+print("\n🔍 检查关键字段数据类型:")
+if 'train_data' in globals() and len(train_data) > 0:
+    print("训练集:")
+    check_dtype_consistency(train_data)
+
+if 'val_data' in globals() and len(val_data) > 0:
+    print("\n验证集:")
+    check_dtype_consistency(val_data)
+
+if 'test_data' in globals() and len(test_data) > 0:
+    print("\n测试集:")
+    check_dtype_consistency(test_data)
+
+print("\n✅ 数据类型统一完成！")
+print("=" * 60)
+
+## 🎯 数据类型统一完成
+
+✅ **已完成的优化：**
+- 统一了所有数值字段为 `float64` 类型
+- 解决了 `0` 和 `0.0` 数据类型不一致问题
+- 避免了由于数据类型差异导致的模型预测偏差
+
+🔍 **关键改进：**
+1. **消除隐式偏差**：确保 APP_0 和 APP_1 中相同数值的字段具有相同的数据类型
+2. **提高模型稳定性**：避免模型学习到无意义的类型差异模式
+3. **增强可重现性**：确保不同运行环境下的数据处理一致性
+
+💡 **建议的使用顺序：**
+1. 运行数据加载单元格
+2. 运行数据类型统一单元格 ⬅️ **当前位置**
+3. 运行数据预处理单元格
+4. 继续后续的特征工程和模型训练
+
+⚠️ **重要提醒：**
+- 如果模型准确率仍然异常高，请检查是否存在数据泄露问题
+- 建议删除可能泄露信息的字段：`flow_id`, `dpi_file_name`, `dpi_five_tuple` 等
+
+# 🚀 智能数据加载：四级列一致性检查
+print("🚀 开始智能数据加载...")
+print("="*80)
+
+# 🔧 数据目录配置
+data_dir = "./pcdn_32_pkts_2class_feature_enhance_v17.4_dataset"
+
+# 检查数据目录是否存在
+if not os.path.exists(data_dir):
+    print(f"❌ 数据目录不存在: {data_dir}")
+    print("请确保数据集文件夹与notebook在同一目录下")
+    print("当前工作目录:", os.getcwd())
+    print("当前目录内容:", [f for f in os.listdir('.') if not f.startswith('.')])
+    
+    # 尝试查找数据目录
+    possible_dirs = [d for d in os.listdir('.') if 'pcdn' in d.lower() and os.path.isdir(d)]
+    if possible_dirs:
+        print(f"发现可能的数据目录: {possible_dirs}")
+        data_dir = possible_dirs[0]
+        print(f"✅ 使用数据目录: {data_dir}")
+    else:
+        raise FileNotFoundError("找不到数据目录，请检查数据集位置")
+else:
+    print(f"✅ 找到数据目录: {data_dir}")
+
+# 收集所有数据集的列信息
+datasets_meta = {}
+
+# 📂 加载训练数据
+print(f"\n📂 加载训练数据...")
+train_normal, train_normal_meta = load_data_from_directory(os.path.join(data_dir, 'Training_set', 'APP_0'), 0)
+train_pcdn, train_pcdn_meta = load_data_from_directory(os.path.join(data_dir, 'Training_set', 'APP_1'), 1)
+
+# 合并训练数据并记录元信息
+train_data = pd.concat([train_normal, train_pcdn], ignore_index=True)
+datasets_meta['Training_set'] = {
+    'final_columns': list(train_data.columns),
+    'dataset_path': 'Training_set',
+    'shape': train_data.shape,
+    'normal_meta': train_normal_meta,
+    'pcdn_meta': train_pcdn_meta
+}
+
+print(f"✅ 训练数据: {len(train_normal)}个正常 + {len(train_pcdn)}个PCDN = {len(train_data)}总样本")
+
+# 📂 加载验证数据
+print(f"\n📂 加载验证数据...")
+val_normal, val_normal_meta = load_data_from_directory(os.path.join(data_dir, 'Validation_set', 'APP_0'), 0)
+val_pcdn, val_pcdn_meta = load_data_from_directory(os.path.join(data_dir, 'Validation_set', 'APP_1'), 1)
+
+# 检查验证数据是否为空
+if len(val_normal) == 0 and len(val_pcdn) == 0:
+    print("⚠️ 验证集为空，将使用训练集的一部分作为验证集")
+    val_data = pd.DataFrame()
+    datasets_meta['Validation_set'] = {'final_columns': [], 'shape': (0, 0), 'status': 'empty'}
+else:
+    val_data = pd.concat([val_normal, val_pcdn], ignore_index=True)
+    datasets_meta['Validation_set'] = {
+        'final_columns': list(val_data.columns),
+        'dataset_path': 'Validation_set',
+        'shape': val_data.shape,
+        'normal_meta': val_normal_meta,
+        'pcdn_meta': val_pcdn_meta
+    }
+    print(f"✅ 验证数据: {len(val_normal)}个正常 + {len(val_pcdn)}个PCDN = {len(val_data)}总样本")
+
+# 📂 加载测试数据
+print(f"\n📂 加载测试数据...")
+test_normal, test_normal_meta = load_data_from_directory(os.path.join(data_dir, 'Testing_set', 'APP_0'), 0)
+test_pcdn, test_pcdn_meta = load_data_from_directory(os.path.join(data_dir, 'Testing_set', 'APP_1'), 1)
+
+# 检查测试数据是否为空
+if len(test_normal) == 0 and len(test_pcdn) == 0:
+    print("⚠️ 测试集为空，将使用训练集的一部分作为测试集")
+    test_data = pd.DataFrame()
+    datasets_meta['Testing_set'] = {'final_columns': [], 'shape': (0, 0), 'status': 'empty'}
+else:
+    test_data = pd.concat([test_normal, test_pcdn], ignore_index=True)
+    datasets_meta['Testing_set'] = {
+        'final_columns': list(test_data.columns),
+        'dataset_path': 'Testing_set', 
+        'shape': test_data.shape,
+        'normal_meta': test_normal_meta,
+        'pcdn_meta': test_pcdn_meta
+    }
+    print(f"✅ 测试数据: {len(test_normal)}个正常 + {len(test_pcdn)}个PCDN = {len(test_data)}总样本")
+
+# 📊 执行跨数据集列结构分析
+print(f"\n" + "="*80)
+print("🔍 开始跨数据集列结构分析...")
+analyze_cross_dataset_columns(datasets_meta)
+
+# 📋 数据加载总结
+print(f"\n" + "="*80)
+print("📋 数据加载总结")
+print("="*80)
+for dataset_name, meta in datasets_meta.items():
+    if 'status' in meta and meta['status'] == 'empty':
+        print(f"📂 {dataset_name}: 空数据集")
+    else:
+        print(f"📂 {dataset_name}: {meta['shape'][0]}行 x {meta['shape'][1]}列")
+
+print("🎉 智能数据加载和跨数据集分析完成！")
+print("="*80)
+
+# 📊 CSV格式和字段探索分析
+
+print("📊 开始CSV格式和字段分析...")
+print("=" * 80)
+
+# 1. 基本数据信息
+print("🔍 **数据集基本信息**:")
+print(f"  训练集形状: {train_data.shape}")
+if len(val_data) > 0:
+    print(f"  验证集形状: {val_data.shape}")
+else:
+    print(f"  验证集: 空 (将从训练集分割)")
+if len(test_data) > 0:
+    print(f"  测试集形状: {test_data.shape}")
+else:
+    print(f"  测试集: 空 (将从训练集分割)")
+
+# 2. CSV文件详细信息展示
+print(f"\n📁 **CSV文件详细信息**:")
+if 'Training_set' in datasets_meta:
+    train_meta = datasets_meta['Training_set']
+    print(f"  训练集文件分布:")
+    
+    # 显示APP_0文件信息
+    if 'normal_meta' in train_meta and 'original_columns_info' in train_meta['normal_meta']:
+        normal_files = train_meta['normal_meta']['original_columns_info']
+        print(f"    📂 APP_0 (正常流量): {len(normal_files)}个CSV文件")
+        for i, file_info in enumerate(normal_files):
+            filename = os.path.basename(file_info['file'])
+            col_count = file_info['count']
+            print(f"      文件{i+1}: {filename} ({col_count}列)")
+    
+    # 显示APP_1文件信息  
+    if 'pcdn_meta' in train_meta and 'original_columns_info' in train_meta['pcdn_meta']:
+        pcdn_files = train_meta['pcdn_meta']['original_columns_info']
+        print(f"    📂 APP_1 (PCDN流量): {len(pcdn_files)}个CSV文件")
+        for i, file_info in enumerate(pcdn_files):
+            filename = os.path.basename(file_info['file'])
+            col_count = file_info['count']
+            print(f"      文件{i+1}: {filename} ({col_count}列)")
+
+# 3. 列名和数据类型分析
+print(f"\n📋 **列名和数据类型** (训练集示例):")
+print(f"  总列数: {len(train_data.columns)}")
+print(f"  数据类型分布:")
+dtype_counts = train_data.dtypes.value_counts()
+for dtype, count in dtype_counts.items():
+    print(f"    {dtype}: {count}列")
+
+print(f"\n📝 **所有列名列表**:")
+all_columns = [col for col in train_data.columns if col not in ['label', 'source_file']]
+print(f"  原始特征列数: {len(all_columns)}")
+
+# 分组显示列名
+chunk_size = 10
+for i in range(0, len(all_columns), chunk_size):
+    chunk = all_columns[i:i+chunk_size]
+    print(f"  {i+1:2d}-{min(i+chunk_size, len(all_columns)):2d}: {chunk}")
+
+# 4. 数据样本展示
+print(f"\n📖 **数据样本展示** (前5行):")
+display_columns = [col for col in train_data.columns if col not in ['source_file']][:15]  # 只显示前15列避免过宽
+print("选择显示前15列:", display_columns)
+print(train_data[display_columns].head())
+
+# 5. 标签分布分析
+print(f"\n🏷️ **标签分布分析**:")
+label_counts = train_data['label'].value_counts().sort_index()
+total_samples = len(train_data)
+
+for label, count in label_counts.items():
+    label_name = "正常流量" if label == 0 else "PCDN流量"
+    percentage = (count / total_samples) * 100
+    print(f"  标签 {label} ({label_name}): {count:,} 样本 ({percentage:.1f}%)")
+
+# 6. 缺失值分析
+print(f"\n🔍 **缺失值分析**:")
+missing_counts = train_data.isnull().sum()
+missing_columns = missing_counts[missing_counts > 0]
+
+if len(missing_columns) > 0:
+    print(f"  发现 {len(missing_columns)} 列有缺失值:")
+    for col, count in missing_columns.items():
+        percentage = (count / len(train_data)) * 100
+        print(f"    {col}: {count} 缺失值 ({percentage:.1f}%)")
+else:
+    print("  ✅ 没有发现缺失值")
+
+# 7. 数值型特征统计描述
+print(f"\n📈 **数值型特征统计描述**:")
+numeric_cols = train_data.select_dtypes(include=[np.number]).columns
+numeric_cols = [col for col in numeric_cols if col != 'label'][:10]  # 选择前10个数值列
+
+if len(numeric_cols) > 0:
+    print(f"  选择前10个数值型特征进行统计:")
+    stats_df = train_data[numeric_cols].describe()
+    print(stats_df)
+else:
+    print("  没有发现数值型特征")
+
+# 8. 序列特征分析 (如果存在)
+sequence_features = ['ip_direction', 'pkt_len', 'iat']
+existing_seq_features = [col for col in sequence_features if col in train_data.columns]
+
+if existing_seq_features:
+    print(f"\n🔄 **序列特征分析**:")
+    print(f"  发现序列特征: {existing_seq_features}")
+    
+    for col in existing_seq_features[:2]:  # 只分析前2个避免输出过长
+        print(f"\n  📊 {col} 特征样本:")
+        # 显示几个序列样本
+        for i in range(min(3, len(train_data))):
+            sample_value = train_data[col].iloc[i]
+            print(f"    样本{i+1}: {str(sample_value)[:100]}{'...' if len(str(sample_value)) > 100 else ''}")
+else:
+    print(f"\n🔄 **序列特征**: 未发现序列特征 {sequence_features}")
+
+# 9. 数据质量检查
+print(f"\n🔍 **数据质量检查**:")
+print(f"  无穷值检查:")
+inf_cols = []
+for col in train_data.select_dtypes(include=[np.number]).columns:
+    inf_count = np.isinf(train_data[col]).sum()
+    if inf_count > 0:
+        inf_cols.append((col, inf_count))
+
+if inf_cols:
+    print(f"    发现无穷值: {len(inf_cols)} 列")
+    for col, count in inf_cols[:5]:  # 只显示前5个
+        print(f"      {col}: {count} 个无穷值")
+else:
+    print("    ✅ 没有发现无穷值")
+
+# 10. 创建数据概览可视化
+print(f"\n📊 生成数据概览图表...")
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+fig.suptitle('Dataset Overview Analysis', fontsize=16, fontweight='bold')
+
+# 10.1 标签分布饼图
+ax1 = axes[0, 0]
+label_names = ['Normal Traffic', 'PCDN Traffic']
+label_values = [label_counts.get(0, 0), label_counts.get(1, 0)]
+colors = ['lightblue', 'lightcoral']
+ax1.pie(label_values, labels=label_names, autopct='%1.1f%%', colors=colors, startangle=90)
+ax1.set_title('Label Distribution')
+
+# 10.2 数据类型分布
+ax2 = axes[0, 1]
+dtype_names = [str(dtype) for dtype in dtype_counts.index]
+ax2.bar(range(len(dtype_names)), dtype_counts.values, color='lightgreen')
+ax2.set_xticks(range(len(dtype_names)))
+ax2.set_xticklabels(dtype_names, rotation=45)
+ax2.set_title('Data Types Distribution')
+ax2.set_ylabel('Number of Columns')
+
+# 10.3 缺失值热图 (如果有缺失值)
+ax3 = axes[1, 0]
+if len(missing_columns) > 0:
+    missing_data = train_data[missing_columns.index[:10]].isnull()  # 最多显示10列
+    sns.heatmap(missing_data, ax=ax3, cbar=True, yticklabels=False, cmap='viridis')
+    ax3.set_title('Missing Values Pattern')
+else:
+    ax3.text(0.5, 0.5, 'No Missing Values Found', transform=ax3.transAxes, 
+             fontsize=14, ha='center', va='center')
+    ax3.set_title('Missing Values Check')
+    ax3.set_xticks([])
+    ax3.set_yticks([])
+
+# 10.4 数值特征分布样本
+ax4 = axes[1, 1]
+if len(numeric_cols) >= 2:
+    # 选择两个数值特征绘制散点图
+    col1, col2 = numeric_cols[0], numeric_cols[1]
+    normal_data = train_data[train_data['label'] == 0]
+    pcdn_data = train_data[train_data['label'] == 1]
+    
+    ax4.scatter(normal_data[col1], normal_data[col2], alpha=0.6, label='Normal', s=20)
+    ax4.scatter(pcdn_data[col1], pcdn_data[col2], alpha=0.6, label='PCDN', s=20)
+    ax4.set_xlabel(col1)
+    ax4.set_ylabel(col2)
+    ax4.set_title(f'Feature Scatter: {col1} vs {col2}')
+    ax4.legend()
+else:
+    ax4.text(0.5, 0.5, 'Insufficient Numeric Features', transform=ax4.transAxes, 
+             fontsize=12, ha='center', va='center')
+    ax4.set_title('Feature Distribution')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\n✅ CSV格式和字段分析完成！")
+print("=" * 80)
+
+# 🔧 数据预处理和特征工程
+
+def preprocess_data(df):
+    """
+    数据预处理函数：删除指定列、处理缺失值等
+    """
+    df_processed = df.copy()
+    
+    # 删除指定的不需要的列
+    columns_to_drop = [
+        'source_file',  # 源文件信息（添加的辅助列）
+        'frame.number', 'frame.time_relative', 'ip.version', 'ip.ttl', 'ip.src', 'ip.dst',
+        'ipv6.plen', 'ipv6.nxt', 'ipv6.src', 'ipv6.dst', '_ws.col.Protocol', 
+        'ssl.handshake.extensions_server_name', 'eth.src', 'pcap_duration', 'app', 'os', 'date',
+        'flow_id', 'dpi_file_name', 'dpi_five_tuple', 'dpi_rule_result', 'dpi_label', 
+        'ulProtoID', 'dpi_rule_pkt', 'dpi_packets', 'dpi_bytes', 'label_source', 'id', 'category'
+    ]
+    
+    # 删除存在的列
+    existing_columns_to_drop = [col for col in columns_to_drop if col in df_processed.columns]
+    if existing_columns_to_drop:
+        df_processed = df_processed.drop(columns=existing_columns_to_drop)
+        print(f"✅ 删除了 {len(existing_columns_to_drop)} 个指定列")
+        
+    # 处理缺失值和无穷值
+    df_processed = df_processed.fillna(0)
+    df_processed = df_processed.replace([np.inf, -np.inf], 0)
+    
+    return df_processed
+
+
+def process_sequence_features(df, enable_sequence_processing=True):
+    """
+    处理序列类型的特征 (pkt_len, ip_direction, iat)
+    enable_sequence_processing: True=转换为统计特征, False=直接删除
+    """
+    df_processed = df.copy()
+    sequence_columns = ['pkt_len', 'ip_direction', 'iat']
+    
+    if not enable_sequence_processing:
+        # 简单模式：直接删除序列特征
+        print("🗑️ 删除序列特征模式...")
+        for col in sequence_columns:
+            if col in df_processed.columns:
+                df_processed = df_processed.drop(columns=[col])
+        print(f"✅ 已删除序列特征: {sequence_columns}")
+        return df_processed
+    
+    # 复杂模式：序列特征工程
+    print("🔧 序列特征工程模式...")
+    
+    for col in sequence_columns:
+        if col in df_processed.columns:
+            print(f"处理序列特征: {col}")
+            
+            # 安全地解析序列数据
+            sequences = []
+            for idx, value in df_processed[col].items():
+                try:
+                    if pd.isna(value) or value == '' or value == 'nan':
+                        sequences.append([])
+                    else:
+                        # 使用 ast.literal_eval 安全解析
+                        if isinstance(value, str):
+                            parsed = ast.literal_eval(value)
+                            sequences.append(parsed if isinstance(parsed, list) else [])
+                        else:
+                            sequences.append([])
+                except:
+                    sequences.append([])
+            
+            # 提取统计特征
+            feature_dict = {}
+            
+            for i, seq in enumerate(sequences):
+                if len(seq) > 0:
+                    # 基础统计特征
+                    feature_dict.setdefault(f'{col}_mean', []).append(np.mean(seq))
+                    feature_dict.setdefault(f'{col}_std', []).append(np.std(seq))
+                    feature_dict.setdefault(f'{col}_min', []).append(np.min(seq))
+                    feature_dict.setdefault(f'{col}_max', []).append(np.max(seq))
+                    feature_dict.setdefault(f'{col}_median', []).append(np.median(seq))
+                    feature_dict.setdefault(f'{col}_range', []).append(np.max(seq) - np.min(seq))
+                    feature_dict.setdefault(f'{col}_q25', []).append(np.percentile(seq, 25))
+                    feature_dict.setdefault(f'{col}_q75', []).append(np.percentile(seq, 75))
+                    feature_dict.setdefault(f'{col}_iqr', []).append(np.percentile(seq, 75) - np.percentile(seq, 25))
+                    feature_dict.setdefault(f'{col}_len', []).append(len(seq))
+                    
+                    # 变异系数
+                    cv = np.std(seq) / np.mean(seq) if np.mean(seq) != 0 else 0
+                    feature_dict.setdefault(f'{col}_cv', []).append(cv)
+                    
+                    # 偏度和峰度
+                    try:
+                        feature_dict.setdefault(f'{col}_skew', []).append(stats.skew(seq))
+                        feature_dict.setdefault(f'{col}_kurtosis', []).append(stats.kurtosis(seq))
+                    except:
+                        feature_dict.setdefault(f'{col}_skew', []).append(0)
+                        feature_dict.setdefault(f'{col}_kurtosis', []).append(0)
+                    
+                    # 序列特定特征
+                    if col == 'ip_direction':
+                        # 出方向比例
+                        out_ratio = sum(1 for x in seq if x == 1) / len(seq)
+                        feature_dict.setdefault(f'{col}_out_ratio', []).append(out_ratio)
+                    elif col == 'pkt_len':
+                        # 小包比例 (<=64字节)
+                        small_pkt_ratio = sum(1 for x in seq if x <= 64) / len(seq)
+                        feature_dict.setdefault(f'{col}_small_pkt_ratio', []).append(small_pkt_ratio)
+                    elif col == 'iat':
+                        # 突发比例 (间隔<=0.1秒)
+                        burst_ratio = sum(1 for x in seq if x <= 0.1) / len(seq)
+                        feature_dict.setdefault(f'{col}_burst_ratio', []).append(burst_ratio)
+                else:
+                    # 处理空序列
+                    for feature_name in [f'{col}_mean', f'{col}_std', f'{col}_min', f'{col}_max', 
+                                       f'{col}_median', f'{col}_range', f'{col}_q25', f'{col}_q75', 
+                                       f'{col}_iqr', f'{col}_len', f'{col}_cv', f'{col}_skew', f'{col}_kurtosis']:
+                        feature_dict.setdefault(feature_name, []).append(0)
+                    
+                    # 序列特定特征的默认值
+                    if col == 'ip_direction':
+                        feature_dict.setdefault(f'{col}_out_ratio', []).append(0)
+                    elif col == 'pkt_len':
+                        feature_dict.setdefault(f'{col}_small_pkt_ratio', []).append(0)
+                    elif col == 'iat':
+                        feature_dict.setdefault(f'{col}_burst_ratio', []).append(0)
+            
+            # 添加新特征到DataFrame
+            for feature_name, feature_values in feature_dict.items():
+                df_processed[feature_name] = feature_values
+            
+            # 删除原始序列列
+            df_processed = df_processed.drop(columns=[col])
+            
+            print(f"  ✅ {col} -> 生成了 {len(feature_dict)} 个统计特征")
+    
+    # 处理非数值列
+    print("\n🔧 处理非数值特征...")
+    label_encoders = {}
+    
+    for col in df_processed.columns:
+        if col != 'label' and df_processed[col].dtype == 'object':
+            try:
+                le = LabelEncoder()
+                df_processed[col] = le.fit_transform(df_processed[col].astype(str))
+                label_encoders[col] = le
+                print(f"  ✅ 标签编码: {col}")
+            except Exception as e:
+                print(f"  ⚠️ 无法编码 {col}, 删除该列: {e}")
+                df_processed = df_processed.drop(columns=[col])
+    
+    return df_processed
+
+
+# 🔧 执行数据预处理
+print("开始数据预处理...")
+print("=" * 60)
+
+# 预处理训练数据
+print("📊 处理训练数据...")
+train_processed = preprocess_data(train_data)
+train_processed = process_sequence_features(train_processed, ENABLE_SEQUENCE_FEATURES)
+
+# 预处理验证数据
+if len(val_data) > 0:
+    print("\n📊 处理验证数据...")
+    val_processed = preprocess_data(val_data)
+    val_processed = process_sequence_features(val_processed, ENABLE_SEQUENCE_FEATURES)
+else:
+    val_processed = pd.DataFrame()
+
+# 预处理测试数据
+if len(test_data) > 0:
+    print("\n📊 处理测试数据...")
+    test_processed = preprocess_data(test_data)
+    test_processed = process_sequence_features(test_processed, ENABLE_SEQUENCE_FEATURES)
+else:
+    test_processed = pd.DataFrame()
+
+print("\n✅ 数据预处理完成！")
+print("=" * 60)
+
+# 🔧 最终特征对齐和训练数据准备
+
+print("🔧 执行最终特征对齐...")
+print("=" * 80)
+
+# 1. 检查预处理后的数据集状态
+print("📊 预处理后数据集状态:")
+train_cols = list(train_processed.columns)
+val_cols = list(val_processed.columns) if len(val_processed) > 0 else []
+test_cols = list(test_processed.columns) if len(test_processed) > 0 else []
+
+print(f"  训练集: {train_processed.shape} (列数: {len(train_cols)})")
+if len(val_processed) > 0:
+    print(f"  验证集: {val_processed.shape} (列数: {len(val_cols)})")
+else:
+    print(f"  验证集: 空数据集")
+if len(test_processed) > 0:
+    print(f"  测试集: {test_processed.shape} (列数: {len(test_cols)})")
+else:
+    print(f"  测试集: 空数据集")
+
+# 2. 特征对齐
+active_datasets = [train_processed]
+active_col_sets = [set(train_cols)]
+
+if len(val_processed) > 0:
+    active_datasets.append(val_processed)
+    active_col_sets.append(set(val_cols))
+if len(test_processed) > 0:
+    active_datasets.append(test_processed)
+    active_col_sets.append(set(test_cols))
+
+# 计算共同特征
+if len(active_col_sets) > 1:
+    common_features = set.intersection(*active_col_sets)
+    common_feature_list = sorted(list(common_features))
+    
+    print(f"\n🔧 特征对齐结果:")
+    print(f"  共同特征数: {len(common_feature_list)}")
+    
+    # 检查是否需要对齐
+    needs_alignment = False
+    for i, dataset in enumerate(active_datasets):
+        current_cols = set(dataset.columns)
+        if len(current_cols) != len(common_features):
+            needs_alignment = True
+            unique_cols = current_cols - common_features
+            if unique_cols:
+                dataset_name = ["训练集", "验证集", "测试集"][i]
+                print(f"  {dataset_name}独有列: {sorted(list(unique_cols))}")
+    
+    if needs_alignment:
+        print(f"\n🔧 执行特征对齐...")
+        train_processed = train_processed[common_feature_list]
+        if len(val_processed) > 0:
+            val_processed = val_processed[common_feature_list]
+        if len(test_processed) > 0:
+            test_processed = test_processed[common_feature_list]
+        print("✅ 特征对齐完成")
+    else:
+        print("✅ 所有数据集特征已经一致")
+else:
+    common_feature_list = train_cols
+    print("✅ 只有训练集，无需对齐")
+
+# 3. 处理空的验证/测试集
+if len(val_processed) == 0 or len(test_processed) == 0:
+    print(f"\n🔧 处理空数据集...")
+    
+    # 从训练集中分割出验证集和测试集
+    X_temp = train_processed.drop(columns=['label'])
+    y_temp = train_processed['label']
+    
+    if len(val_processed) == 0 and len(test_processed) == 0:
+        # 两个都为空，分割为 70% 训练, 15% 验证, 15% 测试
+        X_train_split, X_temp_split, y_train_split, y_temp_split = train_test_split(
+            X_temp, y_temp, test_size=0.3, random_state=42, stratify=y_temp)
+        X_val_split, X_test_split, y_val_split, y_test_split = train_test_split(
+            X_temp_split, y_temp_split, test_size=0.5, random_state=42, stratify=y_temp_split)
+        
+        train_processed = pd.concat([X_train_split, y_train_split], axis=1)
+        val_processed = pd.concat([X_val_split, y_val_split], axis=1)
+        test_processed = pd.concat([X_test_split, y_test_split], axis=1)
+        
+        print(f"  ✅ 分割数据: 训练{len(train_processed)} 验证{len(val_processed)} 测试{len(test_processed)}")
+        
+    elif len(val_processed) == 0:
+        # 只有验证集为空，分割为 80% 训练, 20% 验证
+        X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+            X_temp, y_temp, test_size=0.2, random_state=42, stratify=y_temp)
+        
+        train_processed = pd.concat([X_train_split, y_train_split], axis=1)
+        val_processed = pd.concat([X_val_split, y_val_split], axis=1)
+        
+        print(f"  ✅ 生成验证集: 训练{len(train_processed)} 验证{len(val_processed)}")
+        
+    elif len(test_processed) == 0:
+        # 只有测试集为空，分割为 80% 训练, 20% 测试
+        X_train_split, X_test_split, y_train_split, y_test_split = train_test_split(
+            X_temp, y_temp, test_size=0.2, random_state=42, stratify=y_temp)
+        
+        train_processed = pd.concat([X_train_split, y_train_split], axis=1)
+        test_processed = pd.concat([X_test_split, y_test_split], axis=1)
+        
+        print(f"  ✅ 生成测试集: 训练{len(train_processed)} 测试{len(test_processed)}")
+
+# 4. 准备最终训练数据
+feature_columns = [col for col in train_processed.columns if col != 'label']
+print(f"\n📈 最终数据准备:")
+print(f"  特征数量: {len(feature_columns)}")
+
+X_train = train_processed[feature_columns]
+y_train = train_processed['label']
+
+X_val = val_processed[feature_columns]
+y_val = val_processed['label']
+
+X_test = test_processed[feature_columns]
+y_test = test_processed['label']
+
+# 确保所有数据都是数值型
+X_train = X_train.select_dtypes(include=[np.number])
+X_val = X_val.select_dtypes(include=[np.number])
+X_test = X_test.select_dtypes(include=[np.number])
+
+print(f"\n📊 最终数据形状:")
+print(f"  训练集: {X_train.shape}")
+print(f"  验证集: {X_val.shape}")
+print(f"  测试集: {X_test.shape}")
+
+# 5. 数据质量检查
+print(f"\n🔍 数据质量检查:")
+print(f"  特征维度一致性: {X_train.shape[1] == X_val.shape[1] == X_test.shape[1]}")
+print(f"  训练集NaN: {X_train.isnull().any().any()}")
+print(f"  验证集NaN: {X_val.isnull().any().any()}")
+print(f"  测试集NaN: {X_test.isnull().any().any()}")
+
+print(f"\n📊 标签分布:")
+print(f"  训练集: {y_train.value_counts().to_dict()}")
+print(f"  验证集: {y_val.value_counts().to_dict()}")
+print(f"  测试集: {y_test.value_counts().to_dict()}")
+
+if X_train.shape[1] == X_val.shape[1] == X_test.shape[1]:
+    print(f"\n🎉 数据准备完成！所有数据集特征维度一致: {X_train.shape[1]}个特征")
+else:
+    print(f"\n⚠️ 特征维度不一致，需要进一步检查")
+
+print("=" * 80)
+
+# 保存特征名称以供后续使用
+feature_names = list(X_train.columns)
+print(f"💾 已保存 {len(feature_names)} 个特征名称")
+
+# 🤖 XGBoost模型训练（版本兼容）
+
+print("🤖 开始XGBoost模型训练...")
+print("=" * 80)
+
+# 检查XGBoost版本
+import xgboost
+print(f"XGBoost版本: {xgboost.__version__}")
+
+# 创建输出目录
+output_dir = "output"
+if not os.path.exists(output_dir):
+    os.makedirs(output_dir)
+    print(f"✅ 创建输出目录: {output_dir}")
+
+# 创建XGBoost分类器 - 使用保守参数确保稳定性
 xgb_model = xgb.XGBClassifier(
-    objective='binary:logistic',     # 二分类
-    eval_metric='logloss',           # 评估指标
-    max_depth=6,                     # 树的最大深度
-    learning_rate=0.1,               # 学习率
-    n_estimators=100,                # 树的数量
-    subsample=0.8,                   # 子样本比例
-    colsample_bytree=0.8,           # 特征子样本比例
-    random_state=42,                 # 随机种子
-    n_jobs=-1                        # 使用所有CPU核心
-)
-
-# 训练模型
-print("🔄 正在训练模型...")
-xgb_model.fit(
-    X_train_scaled, y_train,
-    eval_set=[(X_train_scaled, y_train), (X_val_scaled, y_val)],
+    n_estimators=100,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
     eval_metric='logloss',
-    early_stopping_rounds=10,         # 早停
-    verbose=False                     # 不显示训练过程
+    verbosity=0  # 减少输出
 )
 
-print("✅ 模型训练完成!")
+# 🔧 版本兼容的训练策略（三级回退机制）
+training_success = False
+training_method = ""
 
-# 9. 模型预测
-print(f"\n9️⃣ 模型预测...")
+print("\n🔧 开始智能训练（版本兼容）...")
 
-# 在各数据集上进行预测
-y_train_pred = xgb_model.predict(X_train_scaled)
-y_train_prob = xgb_model.predict_proba(X_train_scaled)[:, 1]
+try:
+    # 方法1: 新版本XGBoost方式（推荐）
+    print("🔄 尝试方法1: 新版本训练方式...")
+    xgb_model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        verbose=False
+    )
+    training_success = True
+    training_method = "新版本方式"
+    print("✅ 方法1成功")
+    
+except TypeError as e:
+    if "early_stopping_rounds" in str(e):
+        print("⚠️ 方法1失败：early_stopping_rounds参数问题")
+        
+        try:
+            # 方法2: 在模型初始化时设置early_stopping_rounds
+            print("🔄 尝试方法2: 初始化时设置early_stopping...")
+            xgb_model = xgb.XGBClassifier(
+                n_estimators=100,
+                max_depth=6,
+                learning_rate=0.1,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                random_state=42,
+                eval_metric='logloss',
+                early_stopping_rounds=10,
+                verbosity=0
+            )
+            xgb_model.fit(
+                X_train, y_train,
+                eval_set=[(X_val, y_val)],
+                verbose=False
+            )
+            training_success = True
+            training_method = "初始化early_stopping方式"
+            print("✅ 方法2成功")
+            
+        except Exception as e2:
+            print(f"⚠️ 方法2失败: {e2}")
+            
+            try:
+                # 方法3: 禁用early stopping，增加训练轮数
+                print("🔄 尝试方法3: 禁用early stopping...")
+                xgb_model = xgb.XGBClassifier(
+                    n_estimators=150,  # 增加轮数补偿
+                    max_depth=6,
+                    learning_rate=0.1,
+                    subsample=0.8,
+                    colsample_bytree=0.8,
+                    random_state=42,
+                    eval_metric='logloss',
+                    verbosity=0
+                )
+                xgb_model.fit(X_train, y_train)
+                training_success = True
+                training_method = "无early stopping方式"
+                print("✅ 方法3成功")
+                
+            except Exception as e3:
+                print(f"❌ 方法3也失败: {e3}")
+                training_success = False
+    else:
+        print(f"❌ 训练失败，未知错误: {e}")
+        training_success = False
 
-y_val_pred = xgb_model.predict(X_val_scaled)
-y_val_prob = xgb_model.predict_proba(X_val_scaled)[:, 1]
+if training_success:
+    print(f"\n🎉 模型训练成功！")
+    print(f"📋 使用方法: {training_method}")
+    print(f"📊 训练数据: {X_train.shape[0]}样本, {X_train.shape[1]}特征")
+    print(f"📊 验证数据: {X_val.shape[0]}样本")
+    print(f"📊 测试数据: {X_test.shape[0]}样本")
+else:
+    raise RuntimeError("❌ 所有训练方法都失败了，请检查XGBoost版本和数据")
 
-y_test_pred = xgb_model.predict(X_test_scaled)
-y_test_prob = xgb_model.predict_proba(X_test_scaled)[:, 1]
+print("=" * 80)
 
-# 10. 模型评估
-print(f"\n🔟 模型评估结果...")
+# 📊 模型评估和性能分析
 
-# 准确率
-train_acc = accuracy_score(y_train, y_train_pred)
-val_acc = accuracy_score(y_val, y_val_pred)
-test_acc = accuracy_score(y_test, y_test_pred)
+print("📊 开始模型评估...")
+print("=" * 80)
 
-# AUC (安全计算，处理单类别情况)
-def safe_auc_score(y_true, y_prob, set_name):
-    """安全计算AUC，处理单类别情况"""
-    if len(np.unique(y_true)) < 2:
-        print(f"⚠️  {set_name} 只有一个类别，无法计算AUC")
-        return 0.5  # 返回默认值
-    return roc_auc_score(y_true, y_prob)
+# 模型预测
+print("🔄 执行预测...")
+y_train_pred = xgb_model.predict(X_train)
+y_train_pred_proba = xgb_model.predict_proba(X_train)[:, 1]
 
-train_auc = safe_auc_score(y_train, y_train_prob, "训练集")
-val_auc = safe_auc_score(y_val, y_val_prob, "验证集")
-test_auc = safe_auc_score(y_test, y_test_prob, "测试集")
+y_val_pred = xgb_model.predict(X_val)
+y_val_pred_proba = xgb_model.predict_proba(X_val)[:, 1]
 
-print(f"📊 准确率 (Accuracy):")
-print(f"  训练集: {train_acc:.4f}")
-print(f"  验证集: {val_acc:.4f}")
-print(f"  测试集: {test_acc:.4f}")
+y_test_pred = xgb_model.predict(X_test)
+y_test_pred_proba = xgb_model.predict_proba(X_test)[:, 1]
 
-print(f"\n📊 AUC值:")
-print(f"  训练集: {train_auc:.4f}")
-print(f"  验证集: {val_auc:.4f}")
-print(f"  测试集: {test_auc:.4f}")
+print("✅ 预测完成")
+
+# 计算性能指标
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+def calculate_metrics(y_true, y_pred, y_pred_proba, dataset_name):
+    """计算并显示性能指标"""
+    metrics = {}
+    
+    # 基础分类指标
+    metrics['accuracy'] = accuracy_score(y_true, y_pred)
+    metrics['precision'] = precision_score(y_true, y_pred)
+    metrics['recall'] = recall_score(y_true, y_pred)
+    metrics['f1'] = f1_score(y_true, y_pred)
+    metrics['auc'] = roc_auc_score(y_true, y_pred_proba)
+    
+    print(f"\n📋 {dataset_name}性能指标:")
+    print(f"  准确率 (Accuracy):  {metrics['accuracy']:.4f}")
+    print(f"  精确率 (Precision): {metrics['precision']:.4f}")
+    print(f"  召回率 (Recall):    {metrics['recall']:.4f}")
+    print(f"  F1分数 (F1-Score):  {metrics['f1']:.4f}")
+    print(f"  AUC分数:           {metrics['auc']:.4f}")
+    
+    return metrics
+
+# 计算各数据集的性能指标
+train_metrics = calculate_metrics(y_train, y_train_pred, y_train_pred_proba, "训练集")
+val_metrics = calculate_metrics(y_val, y_val_pred, y_val_pred_proba, "验证集")
+test_metrics = calculate_metrics(y_test, y_test_pred, y_test_pred_proba, "测试集")
+
+# 检查过拟合情况
+print(f"\n🔍 过拟合检查:")
+train_test_auc_diff = train_metrics['auc'] - test_metrics['auc']
+train_test_acc_diff = train_metrics['accuracy'] - test_metrics['accuracy']
+
+print(f"  训练集 vs 测试集 AUC差异: {train_test_auc_diff:.4f}")
+print(f"  训练集 vs 测试集 准确率差异: {train_test_acc_diff:.4f}")
+
+if train_test_auc_diff > 0.1 or train_test_acc_diff > 0.1:
+    print("  ⚠️ 可能存在过拟合，建议调整模型参数")
+elif train_test_auc_diff < 0.02 and train_test_acc_diff < 0.02:
+    print("  ✅ 模型泛化能力良好")
+else:
+    print("  ✅ 模型性能正常")
 
 # 详细分类报告
-print(f"\n📋 测试集详细分类报告:")
-print(classification_report(y_test, y_test_pred, target_names=['正常流量', 'PCDN流量']))
+print(f"\n📈 详细分类报告 (测试集):")
+test_report = classification_report(y_test, y_test_pred, target_names=['正常流量', 'PCDN流量'])
+print(test_report)
 
-# 11. 特征重要性分析
-print(f"\n1️⃣1️⃣ 特征重要性分析...")
+# 创建性能总结字典
+performance_summary = {
+    'training_method': training_method,
+    'feature_count': X_train.shape[1],
+    'train_samples': X_train.shape[0],
+    'val_samples': X_val.shape[0],
+    'test_samples': X_test.shape[0],
+    'train_metrics': train_metrics,
+    'val_metrics': val_metrics,
+    'test_metrics': test_metrics,
+    'sequence_features_enabled': ENABLE_SEQUENCE_FEATURES
+}
+
+print(f"\n💾 性能总结已保存到变量 'performance_summary'")
+print("=" * 80)
+
+# 🎯 特征重要性分析和可视化
+
+print("🎯 开始特征重要性分析...")
+print("=" * 80)
 
 # 获取特征重要性
 feature_importance = xgb_model.feature_importances_
-feature_names = selected_features
-
-# 创建特征重要性DataFrame
-importance_df = pd.DataFrame({
+feature_importance_df = pd.DataFrame({
     'feature': feature_names,
     'importance': feature_importance
 }).sort_values('importance', ascending=False)
 
-print(f"📊 特征重要性排序:")
-for idx, row in importance_df.iterrows():
-    print(f"  {row['feature']}: {row['importance']:.4f}")
+print(f"📊 总特征数: {len(feature_names)}")
+print(f"📈 重要性分析完成")
 
-# 12. 可视化结果
-print(f"\n1️⃣2️⃣ 生成可视化图表...")
+# 显示前20个最重要的特征
+print(f"\n🔝 前20个最重要特征:")
+top_features = feature_importance_df.head(20)
+for i, (_, row) in enumerate(top_features.iterrows(), 1):
+    print(f"  {i:2d}. {row['feature']:30} | 重要性: {row['importance']:.4f}")
 
-# 创建图表
-fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-fig.suptitle('PCDN流量分类结果分析', fontsize=16, fontweight='bold')
+# 分析序列特征vs非序列特征的重要性
+if ENABLE_SEQUENCE_FEATURES:
+    print(f"\n🔍 序列特征 vs 原始特征重要性分析:")
+    
+    sequence_keywords = ['pkt_len_', 'ip_direction_', 'iat_']
+    sequence_features = []
+    original_features = []
+    
+    for _, row in feature_importance_df.iterrows():
+        is_sequence = any(keyword in row['feature'] for keyword in sequence_keywords)
+        if is_sequence:
+            sequence_features.append(row['importance'])
+        else:
+            original_features.append(row['importance'])
+    
+    seq_avg_importance = np.mean(sequence_features) if sequence_features else 0
+    orig_avg_importance = np.mean(original_features) if original_features else 0
+    
+    print(f"  序列特征数量: {len(sequence_features)}")
+    print(f"  原始特征数量: {len(original_features)}")
+    print(f"  序列特征平均重要性: {seq_avg_importance:.4f}")
+    print(f"  原始特征平均重要性: {orig_avg_importance:.4f}")
+    
+    if seq_avg_importance > orig_avg_importance:
+        print(f"  💡 序列特征工程显著提升了模型性能！")
+    else:
+        print(f"  💡 原始特征仍然是主要的预测因子")
 
-# 1. 特征重要性图
+# 创建特征重要性可视化
+print(f"\n📊 生成特征重要性图表...")
+
+# 设置图表
+fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+fig.suptitle('XGBoost Model Analysis - Feature Importance & Performance', fontsize=16, fontweight='bold')
+
+# 1. 前15个最重要特征条形图
 ax1 = axes[0, 0]
-# 动态生成颜色，确保有足够的颜色
-colors = plt.cm.Set3(np.linspace(0, 1, len(importance_df)))
-bars = ax1.bar(importance_df['feature'], importance_df['importance'], 
-               color=colors)
-ax1.set_title('特征重要性分析', fontweight='bold')
-ax1.set_xlabel('特征名称')
-ax1.set_ylabel('重要性分数')
-ax1.tick_params(axis='x', rotation=45)
+top_15_features = feature_importance_df.head(15)
+bars = ax1.barh(range(len(top_15_features)), top_15_features['importance'], color='skyblue')
+ax1.set_yticks(range(len(top_15_features)))
+ax1.set_yticklabels(top_15_features['feature'], fontsize=9)
+ax1.set_xlabel('Feature Importance')
+ax1.set_title('Top 15 Most Important Features')
+ax1.grid(axis='x', alpha=0.3)
 
-# 在柱状图上添加数值标签
-for bar, importance in zip(bars, importance_df['importance']):
-    height = bar.get_height()
-    ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
-             f'{importance:.3f}', ha='center', va='bottom', fontweight='bold')
+# 添加数值标签
+for i, bar in enumerate(bars):
+    width = bar.get_width()
+    ax1.text(width + 0.001, bar.get_y() + bar.get_height()/2, 
+             f'{width:.3f}', ha='left', va='center', fontsize=8)
 
-# 2. ROC曲线
+# 2. 特征重要性分布直方图
 ax2 = axes[0, 1]
+ax2.hist(feature_importance, bins=30, color='lightgreen', alpha=0.7, edgecolor='black')
+ax2.set_xlabel('Feature Importance')
+ax2.set_ylabel('Number of Features')
+ax2.set_title('Distribution of Feature Importance')
+ax2.grid(alpha=0.3)
 
-# 安全绘制ROC曲线
-def safe_plot_roc(y_true, y_prob, label, ax):
-    """安全绘制ROC曲线"""
-    if len(np.unique(y_true)) < 2:
-        return  # 跳过单类别情况
-    fpr, tpr, _ = roc_curve(y_true, y_prob)
-    ax.plot(fpr, tpr, label=label, linewidth=2)
-
-safe_plot_roc(y_train, y_train_prob, f'训练集 (AUC = {train_auc:.3f})', ax2)
-safe_plot_roc(y_val, y_val_prob, f'验证集 (AUC = {val_auc:.3f})', ax2)
-safe_plot_roc(y_test, y_test_prob, f'测试集 (AUC = {test_auc:.3f})', ax2)
-
-ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='随机分类')
-ax2.set_title('ROC曲线比较', fontweight='bold')
-ax2.set_xlabel('假正率 (FPR)')
-ax2.set_ylabel('真正率 (TPR)')
+# 添加统计信息
+mean_importance = np.mean(feature_importance)
+median_importance = np.median(feature_importance)
+ax2.axvline(mean_importance, color='red', linestyle='--', label=f'Mean: {mean_importance:.4f}')
+ax2.axvline(median_importance, color='blue', linestyle='--', label=f'Median: {median_importance:.4f}')
 ax2.legend()
-ax2.grid(True, alpha=0.3)
 
-# 3. 混淆矩阵
+# 3. 序列特征vs原始特征对比（如果启用了序列特征）
 ax3 = axes[1, 0]
-cm = confusion_matrix(y_test, y_test_pred)
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax3,
-            xticklabels=['正常流量', 'PCDN流量'],
-            yticklabels=['正常流量', 'PCDN流量'])
-ax3.set_title('测试集混淆矩阵', fontweight='bold')
-ax3.set_xlabel('预测标签')
-ax3.set_ylabel('真实标签')
+if ENABLE_SEQUENCE_FEATURES and sequence_features and original_features:
+    # 箱线图比较
+    data_to_plot = [sequence_features, original_features]
+    bp = ax3.boxplot(data_to_plot, labels=['Sequence Features', 'Original Features'], patch_artist=True)
+    bp['boxes'][0].set_facecolor('lightcoral')
+    bp['boxes'][1].set_facecolor('lightblue')
+    ax3.set_ylabel('Feature Importance')
+    ax3.set_title('Sequence vs Original Features Importance')
+    ax3.grid(alpha=0.3)
+else:
+    # 如果没有序列特征，显示前10个特征的饼图
+    top_10 = feature_importance_df.head(10)
+    other_importance = feature_importance_df.iloc[10:]['importance'].sum()
+    
+    labels = list(top_10['feature']) + ['Others']
+    sizes = list(top_10['importance']) + [other_importance]
+    
+    ax3.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+    ax3.set_title('Top 10 Features Contribution')
 
-# 4. 准确率对比
+# 4. 累积重要性曲线
 ax4 = axes[1, 1]
-datasets = ['训练集', '验证集', '测试集']
-accuracies = [train_acc, val_acc, test_acc]
-colors = ['#FF9999', '#66B2FF', '#99FF99']
+cumulative_importance = np.cumsum(feature_importance_df['importance'])
+ax4.plot(range(1, len(cumulative_importance) + 1), cumulative_importance, 'b-', linewidth=2)
+ax4.set_xlabel('Number of Features')
+ax4.set_ylabel('Cumulative Importance')
+ax4.set_title('Cumulative Feature Importance')
+ax4.grid(alpha=0.3)
 
-bars = ax4.bar(datasets, accuracies, color=colors, alpha=0.8)
-ax4.set_title('各数据集准确率对比', fontweight='bold')
-ax4.set_ylabel('准确率')
-ax4.set_ylim(0, 1.1)
+# 添加关键阈值线
+threshold_80 = np.where(cumulative_importance >= 0.8)[0]
+threshold_90 = np.where(cumulative_importance >= 0.9)[0]
 
-# 在柱状图上添加数值标签
-for bar, acc in zip(bars, accuracies):
-    height = bar.get_height()
-    ax4.text(bar.get_x() + bar.get_width()/2., height + 0.02,
-             f'{acc:.3f}', ha='center', va='bottom', fontweight='bold')
+if len(threshold_80) > 0:
+    ax4.axvline(threshold_80[0] + 1, color='orange', linestyle='--', 
+                label=f'80% importance: {threshold_80[0] + 1} features')
+if len(threshold_90) > 0:
+    ax4.axvline(threshold_90[0] + 1, color='red', linestyle='--', 
+                label=f'90% importance: {threshold_90[0] + 1} features')
+
+ax4.legend()
 
 plt.tight_layout()
-
-# 安全保存图表
-try:
-    plt.savefig('pcdn_classification_results.png', dpi=300, bbox_inches='tight')
-    print("📊 图表已保存为: pcdn_classification_results.png")
-except Exception as e:
-    print(f"⚠️  图表保存失败: {e}")
-    print("📊 图表仍在内存中显示")
-
 plt.show()
 
-# 13. 总结报告
-print(f"\n1️⃣3️⃣ 分类任务总结报告")
-print("=" * 60)
-print(f"🎯 任务: PCDN流量与正常流量二分类")
-print(f"🔧 使用特征: {', '.join(selected_features)}")
-print(f"📊 数据规模:")
-print(f"  训练集: {len(X_train)} 样本")
-print(f"  验证集: {len(X_val)} 样本") 
-print(f"  测试集: {len(X_test)} 样本")
+# 保存特征重要性数据
+feature_importance_summary = {
+    'top_20_features': top_features.to_dict('records'),
+    'total_features': len(feature_names),
+    'sequence_features_count': len(sequence_features) if ENABLE_SEQUENCE_FEATURES else 0,
+    'original_features_count': len(original_features) if ENABLE_SEQUENCE_FEATURES else len(feature_names),
+    'mean_importance': float(mean_importance),
+    'median_importance': float(median_importance)
+}
 
-print(f"\n🏆 最终性能指标:")
-print(f"  测试集准确率: {test_acc:.4f} ({test_acc*100:.2f}%)")
-print(f"  测试集AUC值: {test_auc:.4f}")
+print(f"\n💾 特征重要性分析已保存到变量 'feature_importance_summary'")
+print("=" * 80)
 
-print(f"\n📈 特征重要性:")
-for idx, row in importance_df.iterrows():
-    percentage = (row['importance'] / importance_df['importance'].sum()) * 100
-    print(f"  {row['feature']}: {row['importance']:.4f} ({percentage:.1f}%)")
+# 📈 ROC曲线和混淆矩阵可视化
 
-print(f"\n✅ 分析完成! 结果已保存到 pcdn_classification_results.png")
-print("=" * 60)
+print("📈 生成ROC曲线和混淆矩阵...")
+print("=" * 80)
+
+# 创建综合可视化图表
+fig, axes = plt.subplots(2, 3, figsize=(21, 14))
+fig.suptitle('XGBoost Model Performance Visualization', fontsize=16, fontweight='bold')
+
+# 1. ROC曲线 - 训练集、验证集、测试集对比
+ax1 = axes[0, 0]
+
+# 计算ROC曲线数据
+from sklearn.metrics import roc_curve
+
+fpr_train, tpr_train, _ = roc_curve(y_train, y_train_pred_proba)
+fpr_val, tpr_val, _ = roc_curve(y_val, y_val_pred_proba)
+fpr_test, tpr_test, _ = roc_curve(y_test, y_test_pred_proba)
+
+# 绘制ROC曲线
+ax1.plot(fpr_train, tpr_train, 'b-', label=f'Training (AUC = {train_metrics["auc"]:.3f})', linewidth=2)
+ax1.plot(fpr_val, tpr_val, 'g-', label=f'Validation (AUC = {val_metrics["auc"]:.3f})', linewidth=2)
+ax1.plot(fpr_test, tpr_test, 'r-', label=f'Test (AUC = {test_metrics["auc"]:.3f})', linewidth=2)
+ax1.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random (AUC = 0.5)')
+
+ax1.set_xlabel('False Positive Rate')
+ax1.set_ylabel('True Positive Rate')
+ax1.set_title('ROC Curves Comparison')
+ax1.legend()
+ax1.grid(alpha=0.3)
+
+# 2. 训练集混淆矩阵
+ax2 = axes[0, 1]
+train_cm = confusion_matrix(y_train, y_train_pred)
+sns.heatmap(train_cm, annot=True, fmt='d', cmap='Blues', ax=ax2,
+            xticklabels=['Normal', 'PCDN'], yticklabels=['Normal', 'PCDN'])
+ax2.set_title('Training Set - Confusion Matrix')
+ax2.set_xlabel('Predicted')
+ax2.set_ylabel('Actual')
+
+# 3. 验证集混淆矩阵
+ax3 = axes[0, 2]
+val_cm = confusion_matrix(y_val, y_val_pred)
+sns.heatmap(val_cm, annot=True, fmt='d', cmap='Greens', ax=ax3,
+            xticklabels=['Normal', 'PCDN'], yticklabels=['Normal', 'PCDN'])
+ax3.set_title('Validation Set - Confusion Matrix')
+ax3.set_xlabel('Predicted')
+ax3.set_ylabel('Actual')
+
+# 4. 测试集混淆矩阵
+ax4 = axes[1, 0]
+test_cm = confusion_matrix(y_test, y_test_pred)
+sns.heatmap(test_cm, annot=True, fmt='d', cmap='Reds', ax=ax4,
+            xticklabels=['Normal', 'PCDN'], yticklabels=['Normal', 'PCDN'])
+ax4.set_title('Test Set - Confusion Matrix')
+ax4.set_xlabel('Predicted')
+ax4.set_ylabel('Actual')
+
+# 5. 性能指标对比
+ax5 = axes[1, 1]
+metrics_names = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'AUC']
+train_values = [train_metrics['accuracy'], train_metrics['precision'], 
+                train_metrics['recall'], train_metrics['f1'], train_metrics['auc']]
+val_values = [val_metrics['accuracy'], val_metrics['precision'], 
+              val_metrics['recall'], val_metrics['f1'], val_metrics['auc']]
+test_values = [test_metrics['accuracy'], test_metrics['precision'], 
+               test_metrics['recall'], test_metrics['f1'], test_metrics['auc']]
+
+x = np.arange(len(metrics_names))
+width = 0.25
+
+ax5.bar(x - width, train_values, width, label='Training', color='skyblue', alpha=0.8)
+ax5.bar(x, val_values, width, label='Validation', color='lightgreen', alpha=0.8)
+ax5.bar(x + width, test_values, width, label='Test', color='lightcoral', alpha=0.8)
+
+ax5.set_xlabel('Metrics')
+ax5.set_ylabel('Score')
+ax5.set_title('Performance Metrics Comparison')
+ax5.set_xticks(x)
+ax5.set_xticklabels(metrics_names, rotation=45)
+ax5.legend()
+ax5.grid(axis='y', alpha=0.3)
+ax5.set_ylim(0, 1.1)
+
+# 添加数值标签
+for i, (train_val, val_val, test_val) in enumerate(zip(train_values, val_values, test_values)):
+    ax5.text(i - width, train_val + 0.01, f'{train_val:.3f}', ha='center', va='bottom', fontsize=8)
+    ax5.text(i, val_val + 0.01, f'{val_val:.3f}', ha='center', va='bottom', fontsize=8)
+    ax5.text(i + width, test_val + 0.01, f'{test_val:.3f}', ha='center', va='bottom', fontsize=8)
+
+# 6. 预测概率分布
+ax6 = axes[1, 2]
+
+# 分别获取正常流量和PCDN流量的预测概率
+normal_proba = y_test_pred_proba[y_test == 0]
+pcdn_proba = y_test_pred_proba[y_test == 1]
+
+ax6.hist(normal_proba, bins=30, alpha=0.6, label='Normal Traffic', color='blue', density=True)
+ax6.hist(pcdn_proba, bins=30, alpha=0.6, label='PCDN Traffic', color='red', density=True)
+ax6.set_xlabel('Predicted Probability (PCDN)')
+ax6.set_ylabel('Density')
+ax6.set_title('Prediction Probability Distribution')
+ax6.legend()
+ax6.grid(alpha=0.3)
+
+# 添加决策阈值线（默认0.5）
+ax6.axvline(0.5, color='green', linestyle='--', linewidth=2, label='Threshold (0.5)')
+
+plt.tight_layout()
+plt.show()
+
+# 计算详细的混淆矩阵统计
+def analyze_confusion_matrix(cm, dataset_name):
+    """分析混淆矩阵并返回详细统计"""
+    tn, fp, fn, tp = cm.ravel()
+    
+    # 计算各种率
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0  # 真正率/召回率
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0  # 真负率
+    ppv = tp / (tp + fp) if (tp + fp) > 0 else 0         # 精确率/阳性预测值
+    npv = tn / (tn + fn) if (tn + fn) > 0 else 0         # 阴性预测值
+    
+    return {
+        'dataset': dataset_name,
+        'true_negative': int(tn),
+        'false_positive': int(fp),
+        'false_negative': int(fn),
+        'true_positive': int(tp),
+        'sensitivity_recall': sensitivity,
+        'specificity': specificity,
+        'precision_ppv': ppv,
+        'negative_predictive_value': npv
+    }
+
+# 分析各数据集的混淆矩阵
+print(f"\n📊 详细混淆矩阵分析:")
+print("=" * 80)
+
+cm_analysis = {
+    'train': analyze_confusion_matrix(train_cm, "训练集"),
+    'val': analyze_confusion_matrix(val_cm, "验证集"),
+    'test': analyze_confusion_matrix(test_cm, "测试集")
+}
+
+for dataset, analysis in cm_analysis.items():
+    print(f"\n📋 {analysis['dataset']}:")
+    print(f"  真负例 (TN): {analysis['true_negative']:4d} | 假正例 (FP): {analysis['false_positive']:4d}")
+    print(f"  假负例 (FN): {analysis['false_negative']:4d} | 真正例 (TP): {analysis['true_positive']:4d}")
+    print(f"  敏感性/召回率: {analysis['sensitivity_recall']:.4f}")
+    print(f"  特异性:       {analysis['specificity']:.4f}")
+    print(f"  精确率:       {analysis['precision_ppv']:.4f}")
+    print(f"  阴性预测值:   {analysis['negative_predictive_value']:.4f}")
+
+print("=" * 80)
+
+# 💾 结果保存和项目总结
+
+print("💾 保存模型和分析结果...")
+print("=" * 80)
+
+import pickle
+import json
+from datetime import datetime
+
+# 创建时间戳
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# 1. 保存XGBoost模型
+try:
+    model_path = os.path.join(output_dir, f"xgboost_model_{timestamp}.pkl")
+    with open(model_path, 'wb') as f:
+        pickle.dump(xgb_model, f)
+    print(f"✅ 模型已保存: {model_path}")
+except Exception as e:
+    print(f"⚠️ 模型保存失败: {e}")
+
+# 2. 保存特征重要性
+try:
+    feature_importance_path = os.path.join(output_dir, f"feature_importance_{timestamp}.csv")
+    feature_importance_df.to_csv(feature_importance_path, index=False, encoding='utf-8-sig')
+    print(f"✅ 特征重要性已保存: {feature_importance_path}")
+except Exception as e:
+    print(f"⚠️ 特征重要性保存失败: {e}")
+
+# 3. 保存完整性能报告
+performance_report = {
+    'timestamp': timestamp,
+    'experiment_info': {
+        'sequence_features_enabled': ENABLE_SEQUENCE_FEATURES,
+        'training_method': training_method,
+        'xgboost_version': xgboost.__version__,
+        'feature_count': len(feature_names),
+        'data_samples': {
+            'train': X_train.shape[0],
+            'validation': X_val.shape[0],
+            'test': X_test.shape[0]
+        }
+    },
+    'performance_metrics': {
+        'train': train_metrics,
+        'validation': val_metrics,
+        'test': test_metrics
+    },
+    'feature_analysis': feature_importance_summary,
+    'confusion_matrix_analysis': cm_analysis,
+    'model_hyperparameters': {
+        'n_estimators': xgb_model.n_estimators,
+        'max_depth': xgb_model.max_depth,
+        'learning_rate': xgb_model.learning_rate,
+        'subsample': xgb_model.subsample,
+        'colsample_bytree': xgb_model.colsample_bytree
+    }
+}
+
+try:
+    report_path = os.path.join(output_dir, f"performance_report_{timestamp}.json")
+    with open(report_path, 'w', encoding='utf-8') as f:
+        json.dump(performance_report, f, indent=2, ensure_ascii=False)
+    print(f"✅ 性能报告已保存: {report_path}")
+except Exception as e:
+    print(f"⚠️ 性能报告保存失败: {e}")
+
+# 4. 保存预测结果
+try:
+    predictions_df = pd.DataFrame({
+        'actual': y_test,
+        'predicted': y_test_pred,
+        'probability_pcdn': y_test_pred_proba,
+        'correct': y_test == y_test_pred
+    })
+    predictions_path = os.path.join(output_dir, f"test_predictions_{timestamp}.csv")
+    predictions_df.to_csv(predictions_path, index=False, encoding='utf-8-sig')
+    print(f"✅ 测试集预测结果已保存: {predictions_path}")
+except Exception as e:
+    print(f"⚠️ 预测结果保存失败: {e}")
+
+# 5. 生成项目总结报告
+print(f"\n📋 项目执行总结:")
+print("=" * 80)
+
+print(f"🎯 **实验配置**")
+print(f"  序列特征处理: {'启用' if ENABLE_SEQUENCE_FEATURES else '禁用'}")
+print(f"  XGBoost版本: {xgboost.__version__}")
+print(f"  训练方式: {training_method}")
+print(f"  特征总数: {len(feature_names)}")
+
+print(f"\n📊 **数据统计**")
+print(f"  训练样本: {X_train.shape[0]:,}")
+print(f"  验证样本: {X_val.shape[0]:,}")
+print(f"  测试样本: {X_test.shape[0]:,}")
+
+print(f"\n🏆 **最佳性能 (测试集)**")
+print(f"  准确率: {test_metrics['accuracy']:.4f}")
+print(f"  精确率: {test_metrics['precision']:.4f}")
+print(f"  召回率: {test_metrics['recall']:.4f}")
+print(f"  F1分数: {test_metrics['f1']:.4f}")
+print(f"  AUC分数: {test_metrics['auc']:.4f}")
+
+if ENABLE_SEQUENCE_FEATURES:
+    print(f"\n🔧 **序列特征工程效果**")
+    print(f"  生成序列特征数: {feature_importance_summary['sequence_features_count']}")
+    print(f"  原始特征数: {feature_importance_summary['original_features_count']}")
+    
+    # 统计前10重要特征中序列特征的比例
+    top_10_features = feature_importance_df.head(10)['feature'].tolist()
+    sequence_in_top10 = sum(1 for feat in top_10_features 
+                           if any(keyword in feat for keyword in ['pkt_len_', 'ip_direction_', 'iat_']))
+    print(f"  前10重要特征中序列特征占比: {sequence_in_top10}/10 ({sequence_in_top10*10:.0f}%)")
+
+print(f"\n📁 **输出文件**")
+output_files = [f for f in os.listdir(output_dir) if timestamp in f]
+for file in sorted(output_files):
+    print(f"  {file}")
+
+print(f"\n💡 **关键发现**")
+# 自动生成关键发现
+findings = []
+
+# 性能分析
+if test_metrics['auc'] >= 0.95:
+    findings.append("🌟 模型性能优秀 (AUC ≥ 0.95)")
+elif test_metrics['auc'] >= 0.90:
+    findings.append("✅ 模型性能良好 (AUC ≥ 0.90)")
+elif test_metrics['auc'] >= 0.80:
+    findings.append("📈 模型性能中等 (AUC ≥ 0.80)")
+else:
+    findings.append("⚠️ 模型性能需要改进 (AUC < 0.80)")
+
+# 泛化能力分析
+train_test_auc_diff = train_metrics['auc'] - test_metrics['auc']
+if train_test_auc_diff <= 0.02:
+    findings.append("🎯 模型泛化能力强，无过拟合")
+elif train_test_auc_diff <= 0.05:
+    findings.append("✅ 模型泛化能力良好")
+else:
+    findings.append("⚠️ 存在过拟合风险，建议调整模型复杂度")
+
+# 序列特征价值分析
+if ENABLE_SEQUENCE_FEATURES and sequence_in_top10 >= 5:
+    findings.append("🚀 序列特征工程非常有效，显著提升了模型性能")
+elif ENABLE_SEQUENCE_FEATURES and sequence_in_top10 >= 3:
+    findings.append("📊 序列特征工程有效，为模型提供了有价值的信息")
+
+# 数据质量分析
+total_samples = X_train.shape[0] + X_val.shape[0] + X_test.shape[0]
+if total_samples >= 10000:
+    findings.append("📈 数据样本充足，模型训练稳定")
+elif total_samples >= 5000:
+    findings.append("📊 数据样本适中，结果可信度良好")
+else:
+    findings.append("⚠️ 数据样本较少，建议增加数据量")
+
+for i, finding in enumerate(findings, 1):
+    print(f"  {i}. {finding}")
+
+print(f"\n🎉 **项目完成状态**")
+print("✅ 数据加载和特征工程完成")
+print("✅ 模型训练和版本兼容处理完成")
+print("✅ 性能评估和可视化完成")
+print("✅ 特征重要性分析完成")
+print("✅ 结果保存和报告生成完成")
+
+print(f"\n💼 **后续建议**")
+print("1. 可以尝试调整XGBoost超参数进一步优化性能")
+print("2. 考虑集成其他算法(如Random Forest, LightGBM)进行模型融合")
+print("3. 深入分析错误预测案例，优化特征工程")
+if not ENABLE_SEQUENCE_FEATURES:
+    print("4. 建议尝试启用序列特征工程以提升性能")
+print("5. 在更大的数据集上验证模型的稳定性")
+
+print("=" * 80)
+print("🎊 PCDN vs Normal Traffic Classification 项目执行完成！")
+print("=" * 80)
+
