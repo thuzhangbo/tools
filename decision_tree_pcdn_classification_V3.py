@@ -49,7 +49,7 @@ selected_features = ['tcp.dstport', 'udp.dstport', 'tcp.srcport', 'udp.srcport']
 # 数据缓存设置
 cache_dir = "data_cache"
 cache_file = os.path.join(cache_dir, "preprocessed_data.pkl")
-force_reload = False  # 设置为True强制重新加载数据
+force_reload = True  # 设置为True强制重新加载数据
 
 def load_data_from_directory(directory_path, label):
     """加载指定目录下的所有CSV文件"""
@@ -136,6 +136,11 @@ if not force_reload and os.path.exists(cache_file):
         y_val = cached_data['y_val']
         y_test = cached_data['y_test']
         scaler = cached_data['scaler']
+        
+        # 从缓存中恢复原始特征数据（用于后续统计）
+        X_train = X_train_scaled  # 对于显示目的，使用scaled版本
+        X_val = X_val_scaled
+        X_test = X_test_scaled
         
         print(f"✅ 缓存数据加载成功!")
         print(f"📊 训练集: {X_train_scaled.shape[0]} 样本, {X_train_scaled.shape[1]} 特征")
