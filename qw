@@ -336,7 +336,7 @@ print(f"  测试集: {test_auc:.4f}")
 
 # 详细分类报告
 print(f"\n📋 测试集详细分类报告:")
-print(classification_report(y_test, y_test_pred, target_names=['正常流量', 'PCDN流量']))
+print(classification_report(y_test, y_test_pred, target_names=['Normal Traffic', 'PCDN Traffic']))
 
 # 11. 特征重要性分析
 print(f"\n1️⃣1️⃣ 特征重要性分析...")
@@ -360,7 +360,7 @@ print(f"\n1️⃣2️⃣ 生成可视化图表...")
 
 # 创建图表
 fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-fig.suptitle('PCDN流量分类结果分析', fontsize=16, fontweight='bold')
+fig.suptitle('PCDN Traffic Classification Results', fontsize=16, fontweight='bold')
 
 # 1. 特征重要性图
 ax1 = axes[0, 0]
@@ -368,9 +368,9 @@ ax1 = axes[0, 0]
 colors = plt.cm.Set3(np.linspace(0, 1, len(importance_df)))
 bars = ax1.bar(importance_df['feature'], importance_df['importance'], 
                color=colors)
-ax1.set_title('特征重要性分析', fontweight='bold')
-ax1.set_xlabel('特征名称')
-ax1.set_ylabel('重要性分数')
+ax1.set_title('Feature Importance Analysis', fontweight='bold')
+ax1.set_xlabel('Feature Names')
+ax1.set_ylabel('Importance Score')
 ax1.tick_params(axis='x', rotation=45)
 
 # 在柱状图上添加数值标签
@@ -390,14 +390,14 @@ def safe_plot_roc(y_true, y_prob, label, ax):
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     ax.plot(fpr, tpr, label=label, linewidth=2)
 
-safe_plot_roc(y_train, y_train_prob, f'训练集 (AUC = {train_auc:.3f})', ax2)
-safe_plot_roc(y_val, y_val_prob, f'验证集 (AUC = {val_auc:.3f})', ax2)
-safe_plot_roc(y_test, y_test_prob, f'测试集 (AUC = {test_auc:.3f})', ax2)
+safe_plot_roc(y_train, y_train_prob, f'Training Set (AUC = {train_auc:.3f})', ax2)
+safe_plot_roc(y_val, y_val_prob, f'Validation Set (AUC = {val_auc:.3f})', ax2)
+safe_plot_roc(y_test, y_test_prob, f'Test Set (AUC = {test_auc:.3f})', ax2)
 
-ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='随机分类')
-ax2.set_title('ROC曲线比较', fontweight='bold')
-ax2.set_xlabel('假正率 (FPR)')
-ax2.set_ylabel('真正率 (TPR)')
+ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random Classifier')
+ax2.set_title('ROC Curve Comparison', fontweight='bold')
+ax2.set_xlabel('False Positive Rate (FPR)')
+ax2.set_ylabel('True Positive Rate (TPR)')
 ax2.legend()
 ax2.grid(True, alpha=0.3)
 
@@ -405,21 +405,21 @@ ax2.grid(True, alpha=0.3)
 ax3 = axes[1, 0]
 cm = confusion_matrix(y_test, y_test_pred)
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax3,
-            xticklabels=['正常流量', 'PCDN流量'],
-            yticklabels=['正常流量', 'PCDN流量'])
-ax3.set_title('测试集混淆矩阵', fontweight='bold')
-ax3.set_xlabel('预测标签')
-ax3.set_ylabel('真实标签')
+            xticklabels=['Normal Traffic', 'PCDN Traffic'],
+            yticklabels=['Normal Traffic', 'PCDN Traffic'])
+ax3.set_title('Test Set Confusion Matrix', fontweight='bold')
+ax3.set_xlabel('Predicted Label')
+ax3.set_ylabel('True Label')
 
 # 4. 准确率对比
 ax4 = axes[1, 1]
-datasets = ['训练集', '验证集', '测试集']
+datasets = ['Training Set', 'Validation Set', 'Test Set']
 accuracies = [train_acc, val_acc, test_acc]
 colors = ['#FF9999', '#66B2FF', '#99FF99']
 
 bars = ax4.bar(datasets, accuracies, color=colors, alpha=0.8)
-ax4.set_title('各数据集准确率对比', fontweight='bold')
-ax4.set_ylabel('准确率')
+ax4.set_title('Accuracy Comparison Across Datasets', fontweight='bold')
+ax4.set_ylabel('Accuracy')
 ax4.set_ylim(0, 1.1)
 
 # 在柱状图上添加数值标签
