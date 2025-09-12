@@ -38,13 +38,13 @@ print("🎯 模型: Decision Tree Classifier")
 print("=" * 60)
 
 # 定义数据路径
-base_path = "pcdn_32_pkts_2class_feature_enhance_v17.4_dataset"
+base_path = "pcdn_32pkts_2class_feature_enhance_v14.5_dataset"
 train_path = os.path.join(base_path, "Training_set")
 val_path = os.path.join(base_path, "Validation_set") 
 test_path = os.path.join(base_path, "Testing_set")
 
 # 选择的特征
-selected_features = ['ip.proto', 'tcp.srcport']
+selected_features = ['tcp.dstport', 'udp.dstport', 'tcp.srcport', 'udp.srcport']
 
 # 数据缓存设置
 cache_dir = "data_cache"
@@ -282,9 +282,9 @@ if not os.path.exists(output_dir):
 
 # 定义超参数网格
 param_grid = {
-    'max_depth': [3, 5, 7, 10, None],
-    'min_samples_split': [2, 5, 10, 20],
-    'min_samples_leaf': [1, 2, 5, 10],
+    'max_depth': [4],
+    'min_samples_split': [2, 5, 10, 15, 20, 30, 32, 35],
+    'min_samples_leaf': [1, 2, 5, 8, 10, 12, 15, 16, 18],
     'criterion': ['gini', 'entropy']
 }
 
