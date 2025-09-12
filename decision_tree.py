@@ -314,39 +314,100 @@ print(f"\n🎯 开始生成可视化图表...")
 # 13. 可视化结果
 print(f"\n1️⃣3️⃣ 生成可视化图表...")
 
-# 创建图表 (3x2布局，包含决策树图)
-fig = plt.figure(figsize=(20, 15))
-fig.suptitle('Decision Tree PCDN Traffic Classification Results', fontsize=16, fontweight='bold')
+# 首先创建决策树的单独可视化图
+print("🌳 生成决策树单独可视化图...")
 
-# 1. 决策树可视化 (占用两个位置)
-ax1 = plt.subplot(3, 2, (1, 2))
+# 确定合适的显示深度（平衡清晰度和信息量）
+tree_depth = dt_model.get_depth()
+display_depth = min(tree_depth, 4)  # 最多显示4层以保持清晰
+
+fig_tree_single, ax_tree_single = plt.subplots(1, 1, figsize=(24, 16))
+
+# 使用更好的配色和样式
 plot_tree(dt_model, 
           feature_names=selected_features,
           class_names=['Normal Traffic', 'PCDN Traffic'],
           filled=True,
-          max_depth=3,  # 限制显示深度以保持清晰
-          fontsize=10,
-          ax=ax1)
-ax1.set_title('Decision Tree Visualization (max_depth=3)', fontweight='bold', fontsize=14)
+          rounded=True,
+          max_depth=display_depth,
+          fontsize=14,
+          proportion=True,  # 显示比例信息
+          impurity=True,    # 显示不纯度
+          ax=ax_tree_single)
 
-# 2. 特征重要性图
-ax2 = plt.subplot(3, 2, 3)
+# 设置标题和样式
+title_text = f'Decision Tree for PCDN Traffic Classification\n'
+title_text += f'(Showing top {display_depth} levels, Total depth: {tree_depth}, Total nodes: {dt_model.tree_.node_count})'
+ax_tree_single.set_title(title_text, fontweight='bold', fontsize=18, pad=20)
+
+# 移除坐标轴
+ax_tree_single.set_xticks([])
+ax_tree_single.set_yticks([])
+ax_tree_single.spines['top'].set_visible(False)
+ax_tree_single.spines['right'].set_visible(False)
+ax_tree_single.spines['bottom'].set_visible(False)
+ax_tree_single.spines['left'].set_visible(False)
+
+# 添加图例说明
+legend_text = """
+📋 How to Read This Decision Tree:
+
+🔹 Node Information:
+   • Feature condition: [feature ≤ threshold]
+   • gini: Impurity measure (0.0 = pure, 0.5 = mixed)
+   • samples: Number of training samples reaching this node
+   • value: [Normal Traffic count, PCDN Traffic count]
+   • class: Final prediction for this node
+
+🔹 Colors:
+   • Orange tones: Predominantly Normal Traffic
+   • Blue tones: Predominantly PCDN Traffic
+   • Darker = more confident, Lighter = more mixed
+
+🔹 Decision Path:
+   • Follow Yes (True) → Left branch
+   • Follow No (False) → Right branch
+   • Leaf nodes show final classification
+"""
+
+ax_tree_single.text(0.02, 0.02, legend_text, transform=ax_tree_single.transAxes, 
+                   fontsize=11, verticalalignment='bottom',
+                   bbox=dict(boxstyle="round,pad=0.8", facecolor="lightyellow", alpha=0.9, edgecolor="gray"))
+
+plt.tight_layout()
+
+# 保存高清的决策树图
+try:
+    plt.savefig(os.path.join(output_dir, 'decision_tree_single_clear.png'), 
+                dpi=300, bbox_inches='tight', facecolor='white')
+    print("📊 清晰决策树图已保存为: output/decision_tree_single_clear.png")
+except Exception as e:
+    print(f"⚠️  决策树图保存失败: {e}")
+
+plt.show()
+
+# 创建其他分析图表 (2x2布局，不包含决策树)
+fig = plt.figure(figsize=(16, 12))
+fig.suptitle('Decision Tree PCDN Traffic Classification - Performance Analysis', fontsize=16, fontweight='bold')
+
+# 1. 特征重要性图
+ax1 = plt.subplot(2, 2, 1)
 colors = plt.cm.Set3(np.linspace(0, 1, len(importance_df)))
-bars = ax2.bar(importance_df['feature'], importance_df['importance'], 
+bars = ax1.bar(importance_df['feature'], importance_df['importance'], 
                color=colors)
-ax2.set_title('Feature Importance Analysis', fontweight='bold')
-ax2.set_xlabel('Feature Names')
-ax2.set_ylabel('Importance Score')
-ax2.tick_params(axis='x', rotation=45)
+ax1.set_title('Feature Importance Analysis', fontweight='bold')
+ax1.set_xlabel('Feature Names')
+ax1.set_ylabel('Importance Score')
+ax1.tick_params(axis='x', rotation=45)
 
 # 在柱状图上添加数值标签
 for bar, importance in zip(bars, importance_df['importance']):
     height = bar.get_height()
-    ax2.text(bar.get_x() + bar.get_width()/2., height + 0.01,
+    ax1.text(bar.get_x() + bar.get_width()/2., height + 0.01,
              f'{importance:.3f}', ha='center', va='bottom', fontweight='bold')
 
-# 3. ROC曲线
-ax3 = plt.subplot(3, 2, 4)
+# 2. ROC曲线
+ax2 = plt.subplot(2, 2, 2)
 
 # 安全绘制ROC曲线
 def safe_plot_roc(y_true, y_prob, label, ax):
@@ -356,79 +417,81 @@ def safe_plot_roc(y_true, y_prob, label, ax):
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     ax.plot(fpr, tpr, label=label, linewidth=2)
 
-safe_plot_roc(y_train, y_train_prob, f'Training Set (AUC = {train_auc:.3f})', ax3)
-safe_plot_roc(y_val, y_val_prob, f'Validation Set (AUC = {val_auc:.3f})', ax3)
-safe_plot_roc(y_test, y_test_prob, f'Test Set (AUC = {test_auc:.3f})', ax3)
+safe_plot_roc(y_train, y_train_prob, f'Training Set (AUC = {train_auc:.3f})', ax2)
+safe_plot_roc(y_val, y_val_prob, f'Validation Set (AUC = {val_auc:.3f})', ax2)
+safe_plot_roc(y_test, y_test_prob, f'Test Set (AUC = {test_auc:.3f})', ax2)
 
-ax3.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random Classifier')
-ax3.set_title('ROC Curve Comparison', fontweight='bold')
-ax3.set_xlabel('False Positive Rate (FPR)')
-ax3.set_ylabel('True Positive Rate (TPR)')
-ax3.legend()
-ax3.grid(True, alpha=0.3)
+ax2.plot([0, 1], [0, 1], 'k--', alpha=0.5, label='Random Classifier')
+ax2.set_title('ROC Curve Comparison', fontweight='bold')
+ax2.set_xlabel('False Positive Rate (FPR)')
+ax2.set_ylabel('True Positive Rate (TPR)')
+ax2.legend()
+ax2.grid(True, alpha=0.3)
 
-# 4. 混淆矩阵
-ax4 = plt.subplot(3, 2, 5)
+# 3. 混淆矩阵
+ax3 = plt.subplot(2, 2, 3)
 cm = confusion_matrix(y_test, y_test_pred)
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax4,
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax3,
             xticklabels=['Normal Traffic', 'PCDN Traffic'],
             yticklabels=['Normal Traffic', 'PCDN Traffic'])
-ax4.set_title('Test Set Confusion Matrix', fontweight='bold')
-ax4.set_xlabel('Predicted Label')
-ax4.set_ylabel('True Label')
+ax3.set_title('Test Set Confusion Matrix', fontweight='bold')
+ax3.set_xlabel('Predicted Label')
+ax3.set_ylabel('True Label')
 
-# 5. 准确率对比
-ax5 = plt.subplot(3, 2, 6)
+# 4. 准确率对比
+ax4 = plt.subplot(2, 2, 4)
 datasets = ['Training Set', 'Validation Set', 'Test Set']
 accuracies = [train_acc, val_acc, test_acc]
 colors_acc = ['#FF9999', '#66B2FF', '#99FF99']
 
-bars = ax5.bar(datasets, accuracies, color=colors_acc, alpha=0.8)
-ax5.set_title('Accuracy Comparison Across Datasets', fontweight='bold')
-ax5.set_ylabel('Accuracy')
-ax5.set_ylim(0, 1.1)
+bars = ax4.bar(datasets, accuracies, color=colors_acc, alpha=0.8)
+ax4.set_title('Accuracy Comparison Across Datasets', fontweight='bold')
+ax4.set_ylabel('Accuracy')
+ax4.set_ylim(0, 1.1)
 
 # 在柱状图上添加数值标签
 for bar, acc in zip(bars, accuracies):
     height = bar.get_height()
-    ax5.text(bar.get_x() + bar.get_width()/2., height + 0.02,
+    ax4.text(bar.get_x() + bar.get_width()/2., height + 0.02,
              f'{acc:.3f}', ha='center', va='bottom', fontweight='bold')
 
 plt.tight_layout()
 
 # 安全保存图表
 try:
-    plt.savefig(os.path.join(output_dir, 'decision_tree_classification_results.png'), 
+    plt.savefig(os.path.join(output_dir, 'decision_tree_performance_analysis.png'), 
                 dpi=300, bbox_inches='tight')
-    print("📊 图表已保存为: output/decision_tree_classification_results.png")
+    print("📊 性能分析图已保存为: output/decision_tree_performance_analysis.png")
 except Exception as e:
-    print(f"⚠️  图表保存失败: {e}")
+    print(f"⚠️  性能分析图保存失败: {e}")
     print("📊 图表仍在内存中显示")
 
 plt.show()
 
-# 14. 决策树详细可视化（单独保存）
-print(f"\n1️⃣4️⃣ 生成详细决策树图...")
+# 14. 生成完整的决策树文本规则
+print(f"\n1️⃣4️⃣ 生成完整决策树规则...")
 
-fig_tree, ax_tree = plt.subplots(1, 1, figsize=(25, 15))
-plot_tree(dt_model, 
-          feature_names=selected_features,
-          class_names=['Normal Traffic', 'PCDN Traffic'],
-          filled=True,
-          rounded=True,
-          fontsize=12,
-          ax=ax_tree)
-ax_tree.set_title(f'Complete Decision Tree (depth={dt_model.get_depth()}, nodes={dt_model.tree_.node_count})', 
-                  fontweight='bold', fontsize=16)
-
+# 导出完整的决策树规则到文件
 try:
-    plt.savefig(os.path.join(output_dir, 'decision_tree_detailed.png'), 
-                dpi=300, bbox_inches='tight')
-    print("📊 详细决策树图已保存为: output/decision_tree_detailed.png")
+    full_tree_rules = export_text(dt_model, feature_names=selected_features)
+    rules_file = os.path.join(output_dir, 'decision_tree_rules.txt')
+    with open(rules_file, 'w', encoding='utf-8') as f:
+        f.write("Decision Tree Rules for PCDN Traffic Classification\n")
+        f.write("=" * 60 + "\n\n")
+        f.write(f"Model Parameters:\n")
+        for param, value in grid_search.best_params_.items():
+            f.write(f"  {param}: {value}\n")
+        f.write(f"\nTree Structure:\n")
+        f.write(f"  Tree Depth: {dt_model.get_depth()}\n")
+        f.write(f"  Number of Leaves: {dt_model.get_n_leaves()}\n")
+        f.write(f"  Total Nodes: {dt_model.tree_.node_count}\n\n")
+        f.write("Decision Rules:\n")
+        f.write("-" * 40 + "\n")
+        f.write(full_tree_rules)
+    
+    print(f"📝 完整决策树规则已保存为: output/decision_tree_rules.txt")
 except Exception as e:
-    print(f"⚠️  详细决策树图保存失败: {e}")
-
-plt.show()
+    print(f"⚠️  决策树规则保存失败: {e}")
 
 # 15. 总结报告
 print(f"\n1️⃣5️⃣ 决策树分类任务总结报告")
@@ -460,8 +523,9 @@ for idx, row in importance_df.iterrows():
     print(f"  {row['feature']}: {row['importance']:.4f} ({percentage:.1f}%)")
 
 print(f"\n📁 输出文件:")
-print(f"  主要结果图: output/decision_tree_classification_results.png")
-print(f"  详细决策树: output/decision_tree_detailed.png")
+print(f"  决策树可视化: output/decision_tree_single_clear.png")
+print(f"  性能分析图: output/decision_tree_performance_analysis.png")
+print(f"  决策规则文件: output/decision_tree_rules.txt")
 
 print(f"\n✅ 决策树分析完成!")
 print("=" * 60)
